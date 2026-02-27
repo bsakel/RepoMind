@@ -52,3 +52,9 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# VS Code directories
+.vscode/
+
+#RepoMind Specific
+memory/

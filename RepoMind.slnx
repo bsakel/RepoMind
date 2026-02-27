@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RepoMind.Mcp/RepoMind.Mcp.csproj" />
+    <Project Path="src/RepoMind.Scanner/RepoMind.Scanner.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RepoMind.Mcp.Tests/RepoMind.Mcp.Tests.csproj" />
+  </Folder>
+</Solution>
