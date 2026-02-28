@@ -24,12 +24,14 @@ src/
       ProcessRunner.cs                      # IProcessRunner abstraction
     Tools/                                  # MCP tool definitions (10 files)
 
-  RepoMind.Scanner/                         # Roslyn scanner (library + CLI)
-    Program.cs                              # Thin CLI wrapper
+  RepoMind.Scanner/                         # Roslyn scanner (library)
     ScannerEngine.cs                        # Core scanning logic (callable in-process)
     Models/                                 # ProjectInfo, AssemblyInfo, TypeInfo
     Parsers/                                # CsprojParser, RoslynScanner, ConfigParser
     Writers/                                # SqliteWriter, FlatFileWriter
+
+  RepoMind.Scanner.Cli/                     # Scanner CLI entry point
+    Program.cs                              # Thin CLI wrapper
 
 tests/
   RepoMind.Mcp.Tests/                       # 74 xUnit tests
@@ -53,7 +55,7 @@ dotnet test RepoMind.slnx
 - **Testing:** xUnit + FluentAssertions + NSubstitute
 - **MCP SDK:** `ModelContextProtocol` NuGet. Tool classes use `[McpServerToolType]`. Methods use `[McpServerTool(Name=...)]` + `[Description(...)]` (from `System.ComponentModel`).
 - **STDIO transport:** stdout is MCP protocol; all logging goes to stderr
-- **QueryService testing:** Uses `internal TestConnection` property (requires `InternalsVisibleTo`) to inject shared in-memory SQLite. Connection disposal uses manual `MaybeClose()` pattern (NOT `using var`).
+- **QueryService testing:** Constructor accepts an optional `Func<SqliteConnection>? connectionFactory` parameter. Tests pass `() => fixture.Connection` to inject a shared in-memory SQLite connection. Connection disposal uses manual `MaybeClose()` pattern (NOT `using var`).
 - **Scanner integration:** MCP server references Scanner via ProjectReference. `ScannerService` calls `ScannerEngine.Run()` in-process.
 - **Internal package detection:** After scanning all projects, the parser marks package references as "internal" if the package name matches any assembly name found in the scanned codebase. No hardcoded prefixes.
 
@@ -77,6 +79,7 @@ dotnet test RepoMind.slnx
 | `update_repos` | Git pull all repos (with optional auto-rescan) |
 | `get_repo_status` | Git status across all repos |
 | `rescan_memory` | Re-run the Roslyn scanner (supports incremental) |
+| `rescan_project` | Rescan a single project by name |
 | `generate_agents_md` | Auto-generate AGENTS.md for the codebase |
 | `check_version_alignment` | Detect NuGet version mismatches (MAJOR/MINOR) |
 | `find_untested_types` | Find production types without test classes |
@@ -96,10 +99,10 @@ For agents or developers that don't use MCP, run the scanner CLI directly:
 
 ```bash
 # Generate flat files only (no SQLite)
-dotnet run --project src/RepoMind.Scanner -- --root /path/to/codebase --flat-only
+dotnet run --project src/RepoMind.Scanner.Cli -- --root /path/to/codebase --flat-only
 
 # Incremental update (only rescan changed projects)
-dotnet run --project src/RepoMind.Scanner -- --root /path/to/codebase --flat-only --incremental
+dotnet run --project src/RepoMind.Scanner.Cli -- --root /path/to/codebase --flat-only --incremental
 ```
 
 Output goes to `<root>/memory/`:

@@ -18,8 +18,8 @@ public class ProjectToolsTests : IClassFixture<TestDatabaseFixture>
             RootPath = "/repos",
             DbPath = ":memory:",
         };
-        var queryService = new QueryService(config) { TestConnection = fixture.Connection };
-        _sut = new ProjectTools(queryService);
+        var queryService = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance, () => fixture.Connection);
+        _sut = new ProjectTools(queryService, Microsoft.Extensions.Logging.Abstractions.NullLogger<ProjectTools>.Instance);
     }
 
     [Fact]

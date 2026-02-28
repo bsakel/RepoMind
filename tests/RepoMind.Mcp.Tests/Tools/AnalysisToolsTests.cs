@@ -17,7 +17,7 @@ public class AnalysisToolsTests : IClassFixture<TestDatabaseFixture>
             RootPath = "/repos",
             DbPath = ":memory:",
         };
-        _sut = new QueryService(config) { TestConnection = fixture.Connection };
+        _sut = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance, () => fixture.Connection);
     }
 
     // --- TraceFlow tests ---

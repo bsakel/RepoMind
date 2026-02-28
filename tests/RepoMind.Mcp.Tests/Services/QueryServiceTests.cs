@@ -15,9 +15,9 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
         var config = new RepoMindConfiguration
         {
             RootPath = "/repos",
-            DbPath = ":memory:", // not actually used since we inject TestConnection
+            DbPath = ":memory:", // not actually used since we inject a connection factory
         };
-        _sut = new QueryService(config) { TestConnection = fixture.Connection };
+        _sut = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance, () => fixture.Connection);
     }
 
     [Fact]
@@ -198,7 +198,7 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
             RootPath = "/nonexistent",
             DbPath = "/nonexistent/path/repomind.db",
         };
-        var sut = new QueryService(config); // no TestConnection = will use OpenConnection
+        var sut = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance); // no factory = will use OpenConnection
 
         var act = () => sut.ListProjects();
 

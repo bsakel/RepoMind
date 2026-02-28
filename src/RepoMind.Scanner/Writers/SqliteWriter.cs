@@ -13,6 +13,7 @@ public class SqliteWriter : IDisposable
         if (File.Exists(dbPath)) File.Delete(dbPath);
         _connection = new SqliteConnection($"Data Source={dbPath}");
         _connection.Open();
+        ApplyPragmas(_connection);
         CreateSchema();
     }
 
@@ -28,6 +29,7 @@ public class SqliteWriter : IDisposable
     {
         var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
+        ApplyPragmas(conn);
         // Ensure new tables exist (for DBs created before methods/endpoints were added)
         EnsureNewTables(conn);
         return new SqliteWriter(conn);
@@ -60,6 +62,7 @@ public class SqliteWriter : IDisposable
     /// </summary>
     public void DeleteProject(string projectName)
     {
+        using var tx = _connection.BeginTransaction();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
             DELETE FROM endpoints WHERE type_id IN (
@@ -108,6 +111,7 @@ public class SqliteWriter : IDisposable
         ";
         cmd.Parameters.AddWithValue("@name", projectName);
         cmd.ExecuteNonQuery();
+        tx.Commit();
     }
 
     /// <summary>
@@ -123,6 +127,24 @@ public class SqliteWriter : IDisposable
         cmd.Parameters.AddWithValue("@name", projectName);
         cmd.Parameters.AddWithValue("@hash", fileHash);
         cmd.Parameters.AddWithValue("@ts", DateTime.UtcNow.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Delete the stored scan hash for a project, forcing it to be rescanned on next incremental run.
+    /// </summary>
+    public static void DeleteScanHash(string dbPath, string projectName)
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+
+        using var checkCmd = conn.CreateCommand();
+        checkCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='scan_metadata'";
+        if (checkCmd.ExecuteScalar() == null) return;
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM scan_metadata WHERE project_name = @name";
+        cmd.Parameters.AddWithValue("@name", projectName);
         cmd.ExecuteNonQuery();
     }
 
@@ -218,7 +240,8 @@ public class SqliteWriter : IDisposable
             CREATE TABLE namespaces (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 assembly_id INTEGER NOT NULL REFERENCES assemblies(id),
-                namespace_name TEXT NOT NULL
+                namespace_name TEXT NOT NULL,
+                UNIQUE(assembly_id, namespace_name)
             );
 
             CREATE TABLE types (
@@ -323,7 +346,7 @@ public class SqliteWriter : IDisposable
         cmd.Parameters.AddWithValue("@sln", (object?)project.SolutionFile ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@remote", (object?)project.GitRemoteUrl ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@branch", (object?)project.DefaultBranch ?? DBNull.Value);
-        return (long)cmd.ExecuteScalar()!;
+        return ExecuteInsertAndGetId(cmd);
     }
 
     public long InsertAssembly(long projectId, AssemblyInfo assembly)
@@ -341,31 +364,39 @@ public class SqliteWriter : IDisposable
         cmd.Parameters.AddWithValue("@ot", (object?)assembly.OutputType ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@test", assembly.IsTest ? 1 : 0);
 
-        var assemblyId = (long)cmd.ExecuteScalar()!;
+        var assemblyId = ExecuteInsertAndGetId(cmd);
+
+        using var pkgCmd = _connection.CreateCommand();
+        pkgCmd.CommandText = @"
+            INSERT INTO package_references (assembly_id, package_name, version, is_internal)
+            VALUES (@aid, @name, @ver, @internal);
+        ";
+        var pkgAid = pkgCmd.Parameters.Add(new SqliteParameter("@aid", SqliteType.Integer));
+        var pkgName = pkgCmd.Parameters.Add(new SqliteParameter("@name", SqliteType.Text));
+        var pkgVer = pkgCmd.Parameters.Add(new SqliteParameter("@ver", SqliteType.Text));
+        var pkgInternal = pkgCmd.Parameters.Add(new SqliteParameter("@internal", SqliteType.Integer));
 
         foreach (var pkg in assembly.PackageReferences)
         {
-            using var pkgCmd = _connection.CreateCommand();
-            pkgCmd.CommandText = @"
-                INSERT INTO package_references (assembly_id, package_name, version, is_internal)
-                VALUES (@aid, @name, @ver, @internal);
-            ";
-            pkgCmd.Parameters.AddWithValue("@aid", assemblyId);
-            pkgCmd.Parameters.AddWithValue("@name", pkg.Name);
-            pkgCmd.Parameters.AddWithValue("@ver", (object?)pkg.Version ?? DBNull.Value);
-            pkgCmd.Parameters.AddWithValue("@internal", pkg.IsInternal ? 1 : 0);
+            pkgAid.Value = assemblyId;
+            pkgName.Value = pkg.Name;
+            pkgVer.Value = (object?)pkg.Version ?? DBNull.Value;
+            pkgInternal.Value = pkg.IsInternal ? 1 : 0;
             pkgCmd.ExecuteNonQuery();
         }
 
+        using var refCmd = _connection.CreateCommand();
+        refCmd.CommandText = @"
+            INSERT INTO project_references (assembly_id, referenced_csproj_path)
+            VALUES (@aid, @path);
+        ";
+        var refAid = refCmd.Parameters.Add(new SqliteParameter("@aid", SqliteType.Integer));
+        var refPath = refCmd.Parameters.Add(new SqliteParameter("@path", SqliteType.Text));
+
         foreach (var projRef in assembly.ProjectReferences)
         {
-            using var refCmd = _connection.CreateCommand();
-            refCmd.CommandText = @"
-                INSERT INTO project_references (assembly_id, referenced_csproj_path)
-                VALUES (@aid, @path);
-            ";
-            refCmd.Parameters.AddWithValue("@aid", assemblyId);
-            refCmd.Parameters.AddWithValue("@path", projRef);
+            refAid.Value = assemblyId;
+            refPath.Value = projRef;
             refCmd.ExecuteNonQuery();
         }
 
@@ -375,49 +406,108 @@ public class SqliteWriter : IDisposable
     public void InsertTypes(long assemblyId, List<TypeInfo> types)
     {
         var byNamespace = types.GroupBy(t => t.NamespaceName);
+
+        // Reuse commands across iterations
+        using var nsInsertCmd = _connection.CreateCommand();
+        nsInsertCmd.CommandText = "INSERT OR IGNORE INTO namespaces (assembly_id, namespace_name) VALUES (@aid, @ns)";
+        var nsAid = nsInsertCmd.Parameters.Add(new SqliteParameter("@aid", SqliteType.Integer));
+        var nsNs = nsInsertCmd.Parameters.Add(new SqliteParameter("@ns", SqliteType.Text));
+
+        using var nsSelectCmd = _connection.CreateCommand();
+        nsSelectCmd.CommandText = "SELECT id FROM namespaces WHERE assembly_id = @aid AND namespace_name = @ns";
+        var nsSelAid = nsSelectCmd.Parameters.Add(new SqliteParameter("@aid", SqliteType.Integer));
+        var nsSelNs = nsSelectCmd.Parameters.Add(new SqliteParameter("@ns", SqliteType.Text));
+
+        using var tCmd = _connection.CreateCommand();
+        tCmd.CommandText = @"
+            INSERT INTO types (namespace_id, type_name, kind, is_public, file_path, base_type, summary_comment)
+            VALUES (@nsid, @name, @kind, @pub, @file, @base, @summary);
+            SELECT last_insert_rowid();
+        ";
+        var tNsid = tCmd.Parameters.Add(new SqliteParameter("@nsid", SqliteType.Integer));
+        var tName = tCmd.Parameters.Add(new SqliteParameter("@name", SqliteType.Text));
+        var tKind = tCmd.Parameters.Add(new SqliteParameter("@kind", SqliteType.Text));
+        var tPub = tCmd.Parameters.Add(new SqliteParameter("@pub", SqliteType.Integer));
+        var tFile = tCmd.Parameters.Add(new SqliteParameter("@file", SqliteType.Text));
+        var tBase = tCmd.Parameters.Add(new SqliteParameter("@base", SqliteType.Text));
+        var tSummary = tCmd.Parameters.Add(new SqliteParameter("@summary", SqliteType.Text));
+
+        using var ifCmd = _connection.CreateCommand();
+        ifCmd.CommandText = "INSERT OR IGNORE INTO type_interfaces (type_id, interface_name) VALUES (@tid, @iface);";
+        var ifTid = ifCmd.Parameters.Add(new SqliteParameter("@tid", SqliteType.Integer));
+        var ifIface = ifCmd.Parameters.Add(new SqliteParameter("@iface", SqliteType.Text));
+
+        using var depCmd = _connection.CreateCommand();
+        depCmd.CommandText = "INSERT OR IGNORE INTO type_injected_deps (type_id, dependency_type) VALUES (@tid, @dep);";
+        var depTid = depCmd.Parameters.Add(new SqliteParameter("@tid", SqliteType.Integer));
+        var depDep = depCmd.Parameters.Add(new SqliteParameter("@dep", SqliteType.Text));
+
+        using var mCmd = _connection.CreateCommand();
+        mCmd.CommandText = @"
+            INSERT INTO methods (type_id, method_name, return_type, is_public, is_static)
+            VALUES (@tid, @name, @ret, @pub, @stat);
+            SELECT last_insert_rowid();
+        ";
+        var mTid = mCmd.Parameters.Add(new SqliteParameter("@tid", SqliteType.Integer));
+        var mName = mCmd.Parameters.Add(new SqliteParameter("@name", SqliteType.Text));
+        var mRet = mCmd.Parameters.Add(new SqliteParameter("@ret", SqliteType.Text));
+        var mPub = mCmd.Parameters.Add(new SqliteParameter("@pub", SqliteType.Integer));
+        var mStat = mCmd.Parameters.Add(new SqliteParameter("@stat", SqliteType.Integer));
+
+        using var pCmd = _connection.CreateCommand();
+        pCmd.CommandText = @"
+            INSERT INTO method_parameters (method_id, param_name, param_type, position)
+            VALUES (@mid, @name, @type, @pos);
+        ";
+        var pMid = pCmd.Parameters.Add(new SqliteParameter("@mid", SqliteType.Integer));
+        var pName = pCmd.Parameters.Add(new SqliteParameter("@name", SqliteType.Text));
+        var pType = pCmd.Parameters.Add(new SqliteParameter("@type", SqliteType.Text));
+        var pPos = pCmd.Parameters.Add(new SqliteParameter("@pos", SqliteType.Integer));
+
+        using var eCmd = _connection.CreateCommand();
+        eCmd.CommandText = @"
+            INSERT INTO endpoints (type_id, method_id, http_method, route_template, endpoint_kind)
+            VALUES (@tid, @mid, @http, @route, @kind);
+        ";
+        var eTid = eCmd.Parameters.Add(new SqliteParameter("@tid", SqliteType.Integer));
+        var eMid = eCmd.Parameters.Add(new SqliteParameter("@mid", SqliteType.Integer));
+        var eHttp = eCmd.Parameters.Add(new SqliteParameter("@http", SqliteType.Text));
+        var eRoute = eCmd.Parameters.Add(new SqliteParameter("@route", SqliteType.Text));
+        var eKind = eCmd.Parameters.Add(new SqliteParameter("@kind", SqliteType.Text));
+
         foreach (var nsGroup in byNamespace)
         {
-            using var nsCmd = _connection.CreateCommand();
-            nsCmd.CommandText = @"
-                INSERT INTO namespaces (assembly_id, namespace_name) VALUES (@aid, @ns);
-                SELECT last_insert_rowid();
-            ";
-            nsCmd.Parameters.AddWithValue("@aid", assemblyId);
-            nsCmd.Parameters.AddWithValue("@ns", nsGroup.Key);
-            var nsId = (long)nsCmd.ExecuteScalar()!;
+            nsAid.Value = assemblyId;
+            nsNs.Value = nsGroup.Key;
+            nsInsertCmd.ExecuteNonQuery();
+
+            nsSelAid.Value = assemblyId;
+            nsSelNs.Value = nsGroup.Key;
+            var nsResult = nsSelectCmd.ExecuteScalar() ?? throw new InvalidOperationException("Namespace row not found after INSERT OR IGNORE");
+            var nsId = (long)nsResult;
 
             foreach (var type in nsGroup)
             {
-                using var tCmd = _connection.CreateCommand();
-                tCmd.CommandText = @"
-                    INSERT INTO types (namespace_id, type_name, kind, is_public, file_path, base_type, summary_comment)
-                    VALUES (@nsid, @name, @kind, @pub, @file, @base, @summary);
-                    SELECT last_insert_rowid();
-                ";
-                tCmd.Parameters.AddWithValue("@nsid", nsId);
-                tCmd.Parameters.AddWithValue("@name", type.TypeName);
-                tCmd.Parameters.AddWithValue("@kind", type.Kind);
-                tCmd.Parameters.AddWithValue("@pub", type.IsPublic ? 1 : 0);
-                tCmd.Parameters.AddWithValue("@file", (object?)type.FilePath ?? DBNull.Value);
-                tCmd.Parameters.AddWithValue("@base", (object?)type.BaseType ?? DBNull.Value);
-                tCmd.Parameters.AddWithValue("@summary", (object?)type.SummaryComment ?? DBNull.Value);
-                var typeId = (long)tCmd.ExecuteScalar()!;
+                tNsid.Value = nsId;
+                tName.Value = type.TypeName;
+                tKind.Value = type.Kind;
+                tPub.Value = type.IsPublic ? 1 : 0;
+                tFile.Value = (object?)type.FilePath ?? DBNull.Value;
+                tBase.Value = (object?)type.BaseType ?? DBNull.Value;
+                tSummary.Value = (object?)type.SummaryComment ?? DBNull.Value;
+                var typeId = ExecuteInsertAndGetId(tCmd);
 
                 foreach (var iface in type.ImplementedInterfaces)
                 {
-                    using var ifCmd = _connection.CreateCommand();
-                    ifCmd.CommandText = "INSERT OR IGNORE INTO type_interfaces (type_id, interface_name) VALUES (@tid, @iface);";
-                    ifCmd.Parameters.AddWithValue("@tid", typeId);
-                    ifCmd.Parameters.AddWithValue("@iface", iface);
+                    ifTid.Value = typeId;
+                    ifIface.Value = iface;
                     ifCmd.ExecuteNonQuery();
                 }
 
                 foreach (var dep in type.InjectedDependencies)
                 {
-                    using var depCmd = _connection.CreateCommand();
-                    depCmd.CommandText = "INSERT OR IGNORE INTO type_injected_deps (type_id, dependency_type) VALUES (@tid, @dep);";
-                    depCmd.Parameters.AddWithValue("@tid", typeId);
-                    depCmd.Parameters.AddWithValue("@dep", dep);
+                    depTid.Value = typeId;
+                    depDep.Value = dep;
                     depCmd.ExecuteNonQuery();
                 }
 
@@ -425,45 +515,29 @@ public class SqliteWriter : IDisposable
                 {
                     foreach (var method in type.Methods)
                     {
-                        using var mCmd = _connection.CreateCommand();
-                        mCmd.CommandText = @"
-                            INSERT INTO methods (type_id, method_name, return_type, is_public, is_static)
-                            VALUES (@tid, @name, @ret, @pub, @stat);
-                            SELECT last_insert_rowid();
-                        ";
-                        mCmd.Parameters.AddWithValue("@tid", typeId);
-                        mCmd.Parameters.AddWithValue("@name", method.MethodName);
-                        mCmd.Parameters.AddWithValue("@ret", method.ReturnType);
-                        mCmd.Parameters.AddWithValue("@pub", method.IsPublic ? 1 : 0);
-                        mCmd.Parameters.AddWithValue("@stat", method.IsStatic ? 1 : 0);
-                        var methodId = (long)mCmd.ExecuteScalar()!;
+                        mTid.Value = typeId;
+                        mName.Value = method.MethodName;
+                        mRet.Value = method.ReturnType;
+                        mPub.Value = method.IsPublic ? 1 : 0;
+                        mStat.Value = method.IsStatic ? 1 : 0;
+                        var methodId = ExecuteInsertAndGetId(mCmd);
 
                         foreach (var param in method.Parameters)
                         {
-                            using var pCmd = _connection.CreateCommand();
-                            pCmd.CommandText = @"
-                                INSERT INTO method_parameters (method_id, param_name, param_type, position)
-                                VALUES (@mid, @name, @type, @pos);
-                            ";
-                            pCmd.Parameters.AddWithValue("@mid", methodId);
-                            pCmd.Parameters.AddWithValue("@name", param.Name);
-                            pCmd.Parameters.AddWithValue("@type", param.Type);
-                            pCmd.Parameters.AddWithValue("@pos", param.Position);
+                            pMid.Value = methodId;
+                            pName.Value = param.Name;
+                            pType.Value = param.Type;
+                            pPos.Value = param.Position;
                             pCmd.ExecuteNonQuery();
                         }
 
                         foreach (var ep in method.Endpoints)
                         {
-                            using var eCmd = _connection.CreateCommand();
-                            eCmd.CommandText = @"
-                                INSERT INTO endpoints (type_id, method_id, http_method, route_template, endpoint_kind)
-                                VALUES (@tid, @mid, @http, @route, @kind);
-                            ";
-                            eCmd.Parameters.AddWithValue("@tid", typeId);
-                            eCmd.Parameters.AddWithValue("@mid", methodId);
-                            eCmd.Parameters.AddWithValue("@http", ep.HttpMethod);
-                            eCmd.Parameters.AddWithValue("@route", (object?)ep.RouteTemplate ?? DBNull.Value);
-                            eCmd.Parameters.AddWithValue("@kind", ep.Kind);
+                            eTid.Value = typeId;
+                            eMid.Value = methodId;
+                            eHttp.Value = ep.HttpMethod;
+                            eRoute.Value = (object?)ep.RouteTemplate ?? DBNull.Value;
+                            eKind.Value = ep.Kind;
                             eCmd.ExecuteNonQuery();
                         }
                     }
@@ -474,19 +548,46 @@ public class SqliteWriter : IDisposable
 
     public void InsertConfigKeys(string projectName, List<Parsers.ConfigEntry> entries)
     {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO config_keys (project_name, source, key_name, default_value, file_path)
+            VALUES (@proj, @src, @key, @val, @file)";
+        var pProj = cmd.Parameters.Add(new SqliteParameter("@proj", SqliteType.Text));
+        var pSrc = cmd.Parameters.Add(new SqliteParameter("@src", SqliteType.Text));
+        var pKey = cmd.Parameters.Add(new SqliteParameter("@key", SqliteType.Text));
+        var pVal = cmd.Parameters.Add(new SqliteParameter("@val", SqliteType.Text));
+        var pFile = cmd.Parameters.Add(new SqliteParameter("@file", SqliteType.Text));
+
         foreach (var entry in entries)
         {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = @"
-                INSERT INTO config_keys (project_name, source, key_name, default_value, file_path)
-                VALUES (@proj, @src, @key, @val, @file)";
-            cmd.Parameters.AddWithValue("@proj", projectName);
-            cmd.Parameters.AddWithValue("@src", entry.Source);
-            cmd.Parameters.AddWithValue("@key", entry.KeyName);
-            cmd.Parameters.AddWithValue("@val", (object?)entry.DefaultValue ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@file", entry.FilePath);
+            pProj.Value = projectName;
+            pSrc.Value = entry.Source;
+            pKey.Value = entry.KeyName;
+            pVal.Value = (object?)entry.DefaultValue ?? DBNull.Value;
+            pFile.Value = entry.FilePath;
             cmd.ExecuteNonQuery();
         }
+    }
+
+    public SqliteTransaction BeginBulkTransaction() => _connection.BeginTransaction();
+
+    private static long ExecuteInsertAndGetId(SqliteCommand cmd)
+    {
+        var result = cmd.ExecuteScalar() ?? throw new InvalidOperationException("INSERT did not return row ID");
+        return (long)result;
+    }
+
+    private static void ApplyPragmas(SqliteConnection connection)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "PRAGMA journal_mode = WAL";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = "PRAGMA synchronous = NORMAL";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = "PRAGMA foreign_keys = ON";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = "PRAGMA cache_size = -64000";
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose() => _connection.Dispose();

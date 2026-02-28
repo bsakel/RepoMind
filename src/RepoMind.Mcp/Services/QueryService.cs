@@ -1,16 +1,21 @@
 using System.Text;
 using RepoMind.Mcp.Configuration;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 
 namespace RepoMind.Mcp.Services;
 
 public class QueryService
 {
     private readonly RepoMindConfiguration _config;
+    private readonly ILogger<QueryService> _logger;
+    private readonly Func<SqliteConnection>? _connectionFactory;
 
-    public QueryService(RepoMindConfiguration config)
+    public QueryService(RepoMindConfiguration config, ILogger<QueryService> logger, Func<SqliteConnection>? connectionFactory = null)
     {
         _config = config;
+        _logger = logger;
+        _connectionFactory = connectionFactory;
     }
 
     private const string NoDatabaseMessage =
@@ -19,18 +24,19 @@ public class QueryService
     private SqliteConnection OpenConnection()
     {
         if (!File.Exists(_config.DbPath))
+        {
+            _logger.LogWarning("Memory database not found at {DbPath}", _config.DbPath);
             throw new DatabaseNotFoundException(NoDatabaseMessage);
+        }
 
+        _logger.LogDebug("Opening database connection to {DbPath}", _config.DbPath);
         var conn = new SqliteConnection($"Data Source={_config.DbPath};Mode=ReadOnly");
         conn.Open();
         return conn;
     }
 
-    // Accepts an already-open connection (for testing with in-memory DBs)
-    internal SqliteConnection? TestConnection { get; set; }
-
-    private SqliteConnection GetConnection() => TestConnection ?? OpenConnection();
-    private bool OwnsConnection => TestConnection == null;
+    private SqliteConnection GetConnection() => _connectionFactory?.Invoke() ?? OpenConnection();
+    private bool OwnsConnection => _connectionFactory == null;
 
     private void MaybeClose(SqliteConnection conn)
     {
@@ -60,7 +66,7 @@ public class QueryService
             {
                 lines.Add($"| {reader.GetString(0)} | {reader.GetInt32(2)} | {reader.GetInt32(3)} |");
             }
-            return lines.Count == 2 ? "No projects found." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, "No projects found.");
         }
         finally { MaybeClose(conn); }
     }
@@ -268,12 +274,12 @@ public class QueryService
 
     public string SearchTypes(string namePattern, string? namespaceName = null, string? kind = null, string? projectName = null)
     {
+        _logger.LogDebug("Executing SearchTypes with pattern: {Pattern}", namePattern);
         var conn = GetConnection();
         try
         {
             // Convert * wildcards to SQL LIKE %
-            var sqlPattern = namePattern.Replace("*", "%");
-            if (!sqlPattern.Contains('%')) sqlPattern = $"%{sqlPattern}%";
+            var sqlPattern = ToSqlPattern(namePattern);
 
             using var cmd = conn.CreateCommand();
             var where = new List<string> { "t.type_name LIKE @pattern" };
@@ -282,7 +288,7 @@ public class QueryService
             if (!string.IsNullOrEmpty(namespaceName))
             {
                 where.Add("n.namespace_name LIKE @ns");
-                cmd.Parameters.AddWithValue("@ns", namespaceName.Replace("*", "%"));
+                cmd.Parameters.AddWithValue("@ns", ToSqlPattern(namespaceName));
             }
             if (!string.IsNullOrEmpty(kind))
             {
@@ -312,19 +318,18 @@ public class QueryService
                 var file = reader.IsDBNull(4) ? "" : reader.GetString(4);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(2)} | {reader.GetString(3)} | {file} |");
             }
-            return lines.Count == 2 ? $"No types matching '{namePattern}'." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No types matching '{namePattern}'.");
         }
         finally { MaybeClose(conn); }
     }
 
     public string FindImplementors(string interfaceName)
     {
+        _logger.LogDebug("Executing FindImplementors with interface: {InterfaceName}", interfaceName);
         var conn = GetConnection();
         try
         {
-            var sqlPattern = interfaceName.Contains('%') || interfaceName.Contains('*')
-                ? interfaceName.Replace("*", "%")
-                : $"%{interfaceName}%";
+            var sqlPattern = ToSqlPattern(interfaceName);
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -346,13 +351,14 @@ public class QueryService
                 var file = reader.IsDBNull(4) ? "" : reader.GetString(4);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(5)} | {reader.GetString(3)} | {file} |");
             }
-            return lines.Count == 2 ? $"No implementors of '{interfaceName}' found." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No implementors of '{interfaceName}' found.");
         }
         finally { MaybeClose(conn); }
     }
 
     public string GetTypeDetails(string typeName)
     {
+        _logger.LogDebug("Executing GetTypeDetails for type: {TypeName}", typeName);
         var conn = GetConnection();
         try
         {
@@ -423,9 +429,7 @@ public class QueryService
         var conn = GetConnection();
         try
         {
-            var sqlPattern = dependencyName.Contains('%') || dependencyName.Contains('*')
-                ? dependencyName.Replace("*", "%")
-                : $"%{dependencyName}%";
+            var sqlPattern = ToSqlPattern(dependencyName);
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -447,7 +451,7 @@ public class QueryService
                 var file = reader.IsDBNull(3) ? "" : reader.GetString(3);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(4)} | {reader.GetString(2)} | {file} |");
             }
-            return lines.Count == 2 ? $"No types inject '{dependencyName}'." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No types inject '{dependencyName}'.");
         }
         finally { MaybeClose(conn); }
     }
@@ -457,9 +461,7 @@ public class QueryService
         var conn = GetConnection();
         try
         {
-            var sqlPattern = packageName.Contains('%') || packageName.Contains('*')
-                ? packageName.Replace("*", "%")
-                : $"%{packageName}%";
+            var sqlPattern = ToSqlPattern(packageName);
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -520,11 +522,11 @@ public class QueryService
 
     public string SearchEndpoints(string routePattern)
     {
+        _logger.LogDebug("Executing SearchEndpoints with pattern: {RoutePattern}", routePattern);
         var conn = GetConnection();
         try
         {
-            var sqlPattern = routePattern.Replace("*", "%");
-            if (!sqlPattern.Contains('%')) sqlPattern = $"%{sqlPattern}%";
+            var sqlPattern = ToSqlPattern(routePattern);
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -553,18 +555,18 @@ public class QueryService
                 var route = reader.IsDBNull(1) ? "" : reader.GetString(1);
                 lines.Add($"| {reader.GetString(0)} | {route} | {reader.GetString(2)} | {reader.GetString(3)} | {reader.GetString(4)} | {reader.GetString(6)} |");
             }
-            return lines.Count == 2 ? $"No endpoints matching '{routePattern}'." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No endpoints matching '{routePattern}'.");
         }
         finally { MaybeClose(conn); }
     }
 
     public string SearchMethods(string namePattern, string? returnType = null, string? projectName = null)
     {
+        _logger.LogDebug("Executing SearchMethods with pattern: {Pattern}", namePattern);
         var conn = GetConnection();
         try
         {
-            var sqlPattern = namePattern.Replace("*", "%");
-            if (!sqlPattern.Contains('%')) sqlPattern = $"%{sqlPattern}%";
+            var sqlPattern = ToSqlPattern(namePattern);
 
             using var cmd = conn.CreateCommand();
             var where = new List<string> { "m.method_name LIKE @pattern" };
@@ -603,7 +605,7 @@ public class QueryService
                 var file = reader.IsDBNull(5) ? "" : reader.GetString(5);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(2)} | {reader.GetString(4)} | {file} |");
             }
-            return lines.Count == 2 ? $"No methods matching '{namePattern}'." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No methods matching '{namePattern}'.");
         }
         finally { MaybeClose(conn); }
     }
@@ -811,7 +813,20 @@ public class QueryService
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
-        return (T)cmd.ExecuteScalar()!;
+        var result = cmd.ExecuteScalar();
+        return result is T typed ? typed : throw new InvalidOperationException($"Query returned null or unexpected type");
+    }
+
+    private static string ToSqlPattern(string input)
+    {
+        var pattern = input.Replace("*", "%");
+        if (!pattern.Contains('%')) pattern = $"%{pattern}%";
+        return pattern;
+    }
+
+    private static string BuildMarkdownTable(List<string> lines, string emptyMessage)
+    {
+        return lines.Count == 2 ? emptyMessage : string.Join("\n", lines);
     }
 
     public string SearchConfig(string keyPattern, string? source = null, string? projectName = null)
@@ -819,8 +834,7 @@ public class QueryService
         var conn = GetConnection();
         try
         {
-            var sqlPattern = keyPattern.Replace("*", "%");
-            if (!sqlPattern.Contains('%')) sqlPattern = $"%{sqlPattern}%";
+            var sqlPattern = ToSqlPattern(keyPattern);
 
             using var cmd = conn.CreateCommand();
             var where = new List<string> { "key_name LIKE @pattern" };
@@ -855,13 +869,14 @@ public class QueryService
                 var defaultVal = reader.IsDBNull(3) ? "" : reader.GetString(3);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(2)} | {defaultVal} | {reader.GetString(4)} |");
             }
-            return lines.Count == 2 ? $"No config keys matching '{keyPattern}'." : string.Join("\n", lines);
+            return BuildMarkdownTable(lines, $"No config keys matching '{keyPattern}'.");
         }
         finally { MaybeClose(conn); }
     }
 
     public string TraceFlow(string typeName, int maxDepth = 3)
     {
+        _logger.LogDebug("Executing TraceFlow for type: {TypeName}, maxDepth: {MaxDepth}", typeName, maxDepth);
         var conn = GetConnection();
         try
         {
@@ -920,7 +935,7 @@ public class QueryService
             "JOIN namespaces n ON t.namespace_id = n.id " +
             "JOIN assemblies a ON n.assembly_id = a.id " +
             "JOIN projects p ON a.project_id = p.id " +
-            "WHERE tid.dependency_type LIKE @name", $"%{typeName}%");
+            "WHERE tid.dependency_type = @name", typeName);
 
         if (injectors.Count > 0)
         {
@@ -948,6 +963,7 @@ public class QueryService
 
     public string AnalyzeImpact(string typeName)
     {
+        _logger.LogDebug("Executing AnalyzeImpact for type: {TypeName}", typeName);
         var conn = GetConnection();
         try
         {
@@ -989,7 +1005,7 @@ public class QueryService
                 "JOIN namespaces n ON t.namespace_id = n.id " +
                 "JOIN assemblies a ON n.assembly_id = a.id " +
                 "JOIN projects p ON a.project_id = p.id " +
-                "WHERE tid.dependency_type LIKE @name", $"%{typeName}%");
+                "WHERE tid.dependency_type = @name", typeName);
 
             // Direct references: base type usage
             var inheritors = QueryTypeList(conn,
@@ -1056,26 +1072,37 @@ public class QueryService
 
     private static void FindTransitiveDependents(SqliteConnection conn, string projectName, HashSet<string> transitiveProjects, HashSet<string> excludeProjects)
     {
-        // Find projects that reference assemblies from the given project
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-            SELECT DISTINCT p2.name
-            FROM package_references pr
-            JOIN assemblies a ON pr.assembly_id = a.id
-            JOIN projects p2 ON a.project_id = p2.id
-            WHERE pr.is_internal = 1
-              AND pr.package_name IN (
-                  SELECT a2.assembly_name FROM assemblies a2
-                  JOIN projects p ON a2.project_id = p.id
-                  WHERE p.name = @name AND a2.is_test = 0)
-              AND p2.name != @name";
-        cmd.Parameters.AddWithValue("@name", projectName);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
+        var queue = new Queue<string>();
+        queue.Enqueue(projectName);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { projectName };
+
+        while (queue.Count > 0)
         {
-            var dep = reader.GetString(0);
-            if (!excludeProjects.Contains(dep))
-                transitiveProjects.Add(dep);
+            var current = queue.Dequeue();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT DISTINCT p2.name
+                FROM package_references pr
+                JOIN assemblies a ON pr.assembly_id = a.id
+                JOIN projects p2 ON a.project_id = p2.id
+                WHERE pr.is_internal = 1
+                  AND pr.package_name IN (
+                      SELECT a2.assembly_name FROM assemblies a2
+                      JOIN projects p ON a2.project_id = p.id
+                      WHERE p.name = @name AND a2.is_test = 0)
+                  AND p2.name != @name";
+            cmd.Parameters.AddWithValue("@name", current);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var dep = reader.GetString(0);
+                if (visited.Add(dep))
+                {
+                    if (!excludeProjects.Contains(dep))
+                        transitiveProjects.Add(dep);
+                    queue.Enqueue(dep);
+                }
+            }
         }
     }
 
@@ -1153,6 +1180,65 @@ public class QueryService
             majors.Add(dot > 0 ? v[..dot] : v);
         }
         return majors.Count > 1 ? "MAJOR" : "MINOR";
+    }
+
+    public string GetMemoryInfo()
+    {
+        var conn = GetConnection();
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("## Memory Database Info\n");
+
+            // DB file size
+            if (File.Exists(_config.DbPath))
+            {
+                var size = new FileInfo(_config.DbPath).Length;
+                var sizeStr = size < 1024 * 1024
+                    ? $"{size / 1024.0:F1} KB"
+                    : $"{size / (1024.0 * 1024.0):F1} MB";
+                sb.AppendLine($"**Database path:** `{_config.DbPath}`");
+                sb.AppendLine($"**Database size:** {sizeStr}\n");
+            }
+
+            // Last scan timestamp from scan_metadata (if table exists)
+            try
+            {
+                using var metaCmd = conn.CreateCommand();
+                metaCmd.CommandText = "SELECT value FROM scan_metadata WHERE key = 'last_scan_timestamp'";
+                var timestamp = metaCmd.ExecuteScalar() as string;
+                if (timestamp != null)
+                    sb.AppendLine($"**Last scan:** {timestamp}\n");
+            }
+            catch (SqliteException)
+            {
+                // scan_metadata table may not exist
+            }
+
+            // Row counts per key table
+            sb.AppendLine("### Row Counts\n");
+            sb.AppendLine("| Table | Rows |");
+            sb.AppendLine("| --- | --- |");
+
+            string[] tables = ["projects", "assemblies", "types", "methods", "endpoints", "config_keys"];
+            foreach (var table in tables)
+            {
+                try
+                {
+                    using var countCmd = conn.CreateCommand();
+                    countCmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                    var count = Convert.ToInt64(countCmd.ExecuteScalar());
+                    sb.AppendLine($"| {table} | {count} |");
+                }
+                catch (SqliteException)
+                {
+                    sb.AppendLine($"| {table} | _(table not found)_ |");
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+        finally { MaybeClose(conn); }
     }
 
     public string FindUntestedTypes(string? projectName = null)
