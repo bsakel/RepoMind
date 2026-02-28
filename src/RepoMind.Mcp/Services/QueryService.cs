@@ -244,6 +244,7 @@ public class QueryService
 
             // Upstream: what this project depends on
             sb.AppendLine("\n## Depends On (upstream)");
+            var upstreamPackages = new List<string>();
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
@@ -255,20 +256,20 @@ public class QueryService
                     ORDER BY pr.package_name";
                 cmd.Parameters.AddWithValue("@name", resolvedName);
                 using var reader = cmd.ExecuteReader();
-                var found = false;
                 while (reader.Read())
                 {
-                    found = true;
-                    sb.AppendLine($"- {reader.GetString(0)} {reader.GetString(1)}");
+                    var pkgName = reader.GetString(0);
+                    upstreamPackages.Add(pkgName);
+                    sb.AppendLine($"- {pkgName} {reader.GetString(1)}");
                 }
-                if (!found) sb.AppendLine("None (foundation library)");
+                if (upstreamPackages.Count == 0) sb.AppendLine("None (foundation library)");
             }
 
             // Downstream: what depends on this project
             sb.AppendLine("\n## Depended On By (downstream)");
+            var downstreamProjects = new List<string>();
             using (var cmd = conn.CreateCommand())
             {
-                // Find projects that have internal package references matching this project's assembly names
                 cmd.CommandText = @"
                     SELECT DISTINCT p2.name
                     FROM package_references pr
@@ -284,13 +285,29 @@ public class QueryService
                     ORDER BY p2.name";
                 cmd.Parameters.AddWithValue("@name", resolvedName);
                 using var reader = cmd.ExecuteReader();
-                var found = false;
                 while (reader.Read())
-                {
-                    found = true;
-                    sb.AppendLine($"- {reader.GetString(0)}");
-                }
-                if (!found) sb.AppendLine("None (leaf service)");
+                    downstreamProjects.Add(reader.GetString(0));
+            }
+
+            if (downstreamProjects.Count > 0)
+                foreach (var p in downstreamProjects)
+                    sb.AppendLine($"- {p}");
+            else
+                sb.AppendLine("None (leaf service)");
+
+            // Mermaid diagram
+            if (upstreamPackages.Count > 0 || downstreamProjects.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Dependency Diagram");
+                sb.AppendLine();
+                sb.AppendLine("```mermaid");
+                sb.AppendLine("graph LR");
+                foreach (var pkg in upstreamPackages)
+                    sb.AppendLine($"    {SanitizeMermaidId(resolvedName)} -->|depends on| {SanitizeMermaidId(pkg)}");
+                foreach (var p in downstreamProjects)
+                    sb.AppendLine($"    {SanitizeMermaidId(p)} -->|depends on| {SanitizeMermaidId(resolvedName)}");
+                sb.AppendLine("```");
             }
 
             return sb.ToString();
@@ -831,6 +848,12 @@ public class QueryService
         return lines.Count == 2 ? emptyMessage : string.Join("\n", lines);
     }
 
+    private static string SanitizeMermaidId(string name)
+    {
+        // Mermaid IDs can't contain angle brackets, spaces, or special chars
+        return name.Replace("<", "_").Replace(">", "_").Replace(" ", "_").Replace(".", "_").Replace("-", "_");
+    }
+
     public string SearchConfig(string keyPattern, string? source = null, string? projectName = null)
     {
         var conn = GetConnection();
@@ -887,17 +910,36 @@ public class QueryService
             sb.AppendLine();
 
             var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            TraceFlowRecursive(conn, sb, typeName, 0, maxDepth, visited);
+            var edges = new List<(string From, string To, string Label)>();
+            TraceFlowRecursive(conn, sb, typeName, 0, maxDepth, visited, edges);
 
             if (visited.Count <= 1)
                 sb.AppendLine("No flow connections found for this type.");
+
+            // Append Mermaid diagram
+            if (edges.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Dependency Graph");
+                sb.AppendLine();
+                sb.AppendLine("```mermaid");
+                sb.AppendLine("graph LR");
+                var seen = new HashSet<string>();
+                foreach (var (from, to, label) in edges)
+                {
+                    var edge = $"    {SanitizeMermaidId(from)} -->|{label}| {SanitizeMermaidId(to)}";
+                    if (seen.Add(edge))
+                        sb.AppendLine(edge);
+                }
+                sb.AppendLine("```");
+            }
 
             return sb.ToString();
         }
         finally { MaybeClose(conn); }
     }
 
-    private void TraceFlowRecursive(SqliteConnection conn, StringBuilder sb, string typeName, int depth, int maxDepth, HashSet<string> visited)
+    private void TraceFlowRecursive(SqliteConnection conn, StringBuilder sb, string typeName, int depth, int maxDepth, HashSet<string> visited, List<(string From, string To, string Label)> edges)
     {
         if (depth > maxDepth || !visited.Add(typeName)) return;
 
@@ -915,16 +957,16 @@ public class QueryService
             foreach (var (implType, project) in implementors)
             {
                 sb.AppendLine($"{indent}  → {implType} ({project})");
-                // Find who injects this implementor
-                TraceInjectors(conn, sb, implType, depth + 1, maxDepth, visited);
+                edges.Add((typeName, implType, "implements"));
+                TraceInjectors(conn, sb, implType, depth + 1, maxDepth, visited, edges);
             }
         }
 
         // Find types that inject this type directly
-        TraceInjectors(conn, sb, typeName, depth, maxDepth, visited);
+        TraceInjectors(conn, sb, typeName, depth, maxDepth, visited, edges);
     }
 
-    private void TraceInjectors(SqliteConnection conn, StringBuilder sb, string typeName, int depth, int maxDepth, HashSet<string> visited)
+    private void TraceInjectors(SqliteConnection conn, StringBuilder sb, string typeName, int depth, int maxDepth, HashSet<string> visited, List<(string From, string To, string Label)> edges)
     {
         var indent = new string(' ', depth * 2);
 
@@ -939,8 +981,9 @@ public class QueryService
             foreach (var (injType, project) in injectors)
             {
                 sb.AppendLine($"{indent}  ← {injType} ({project})");
+                edges.Add((injType, typeName, "injects"));
                 if (depth + 1 <= maxDepth)
-                    TraceFlowRecursive(conn, sb, injType, depth + 1, maxDepth, visited);
+                    TraceFlowRecursive(conn, sb, injType, depth + 1, maxDepth, visited, edges);
             }
         }
     }
@@ -1048,6 +1091,31 @@ public class QueryService
             sb.AppendLine($"- **Direct references:** {allReferences.Count} types across {directProjects.Count} projects");
             sb.AppendLine($"- **Transitive impact:** {transitiveProjects.Count} additional projects");
             sb.AppendLine($"- **Total blast radius:** {directProjects.Count + transitiveProjects.Count} projects");
+
+            // Mermaid diagram
+            if (allReferences.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Impact Graph");
+                sb.AppendLine();
+                sb.AppendLine("```mermaid");
+                sb.AppendLine("graph TD");
+                sb.AppendLine($"    {SanitizeMermaidId(typeName)}:::{(homeProjects.Count > 0 ? "source" : "default")}");
+                var seen = new HashSet<string>();
+                foreach (var (t, _, r) in allReferences)
+                {
+                    var edge = $"    {SanitizeMermaidId(t)} -->|{r}| {SanitizeMermaidId(typeName)}";
+                    if (seen.Add(edge))
+                        sb.AppendLine(edge);
+                }
+                foreach (var tp in transitiveProjects)
+                {
+                    var edge = $"    {SanitizeMermaidId(tp)}[/{tp}/] -.->|transitive| {SanitizeMermaidId(typeName)}";
+                    if (seen.Add(edge))
+                        sb.AppendLine(edge);
+                }
+                sb.AppendLine("```");
+            }
 
             return sb.ToString();
         }
@@ -1287,6 +1355,282 @@ public class QueryService
 
             var count = lines.Count - 2;
             return $"Found **{count} production types** without matching test classes:\n\n" + string.Join("\n", lines);
+        }
+        finally { MaybeClose(conn); }
+    }
+
+    public string GenerateProjectSummary(string projectName)
+    {
+        _logger.LogDebug("Generating project summary for: {ProjectName}", projectName);
+        var conn = GetConnection();
+        try
+        {
+            var resolvedName = ResolveProjectName(conn, projectName);
+            if (resolvedName == null)
+                return $"Project '{projectName}' not found.";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"# Project Summary: {resolvedName}");
+            sb.AppendLine();
+
+            // Gather stats
+            long asmCount = 0, typeCount = 0, interfaceCount = 0, classCount = 0, endpointCount = 0, methodCount = 0;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT
+                        (SELECT COUNT(*) FROM assemblies WHERE project_id = p.id AND is_test = 0),
+                        (SELECT COUNT(*) FROM types t JOIN namespaces n ON t.namespace_id = n.id JOIN assemblies a ON n.assembly_id = a.id WHERE a.project_id = p.id AND t.is_public = 1),
+                        (SELECT COUNT(*) FROM types t JOIN namespaces n ON t.namespace_id = n.id JOIN assemblies a ON n.assembly_id = a.id WHERE a.project_id = p.id AND t.kind = 'interface'),
+                        (SELECT COUNT(*) FROM types t JOIN namespaces n ON t.namespace_id = n.id JOIN assemblies a ON n.assembly_id = a.id WHERE a.project_id = p.id AND t.kind = 'class'),
+                        (SELECT COUNT(*) FROM endpoints e JOIN types t ON e.type_id = t.id JOIN namespaces n ON t.namespace_id = n.id JOIN assemblies a ON n.assembly_id = a.id WHERE a.project_id = p.id),
+                        (SELECT COUNT(*) FROM methods m JOIN types t ON m.type_id = t.id JOIN namespaces n ON t.namespace_id = n.id JOIN assemblies a ON n.assembly_id = a.id WHERE a.project_id = p.id)
+                    FROM projects p WHERE p.name = @name";
+                cmd.Parameters.AddWithValue("@name", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    asmCount = reader.GetInt64(0);
+                    typeCount = reader.GetInt64(1);
+                    interfaceCount = reader.GetInt64(2);
+                    classCount = reader.GetInt64(3);
+                    endpointCount = reader.GetInt64(4);
+                    methodCount = reader.GetInt64(5);
+                }
+            }
+
+            // Determine project role
+            var roles = new List<string>();
+            if (endpointCount > 0) roles.Add("API service");
+            if (interfaceCount > classCount && interfaceCount > 0) roles.Add("contract/abstraction library");
+            else if (classCount > 0 && interfaceCount == 0 && endpointCount == 0) roles.Add("implementation library");
+
+            // Check for DI-heavy types
+            long diTypeCount = 0;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(DISTINCT tid.type_id)
+                    FROM type_injected_deps tid
+                    JOIN types t ON tid.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    WHERE a.project_id = (SELECT id FROM projects WHERE name = @name)";
+                cmd.Parameters.AddWithValue("@name", resolvedName);
+                diTypeCount = (long)(cmd.ExecuteScalar() ?? 0);
+            }
+            if (diTypeCount > 3) roles.Add("DI-heavy service layer");
+
+            // Upstream/downstream count
+            long upstreamCount = 0, downstreamCount = 0;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(DISTINCT pr.package_name)
+                    FROM package_references pr JOIN assemblies a ON pr.assembly_id = a.id
+                    WHERE a.project_id = (SELECT id FROM projects WHERE name = @name) AND pr.is_internal = 1";
+                cmd.Parameters.AddWithValue("@name", resolvedName);
+                upstreamCount = (long)(cmd.ExecuteScalar() ?? 0);
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(DISTINCT p2.id)
+                    FROM package_references pr JOIN assemblies a ON pr.assembly_id = a.id JOIN projects p2 ON a.project_id = p2.id
+                    WHERE pr.is_internal = 1 AND pr.package_name IN (SELECT assembly_name FROM assemblies WHERE project_id = (SELECT id FROM projects WHERE name = @name))
+                    AND p2.name != @name";
+                cmd.Parameters.AddWithValue("@name", resolvedName);
+                downstreamCount = (long)(cmd.ExecuteScalar() ?? 0);
+            }
+
+            if (downstreamCount > 3) roles.Add("foundational library");
+            if (upstreamCount == 0 && downstreamCount == 0) roles.Add("standalone");
+
+            // Build summary paragraph
+            sb.Append($"**{resolvedName}** is a ");
+            sb.Append(roles.Count > 0 ? string.Join(", ", roles) : "project");
+            sb.Append($" containing {asmCount} assemblies, {typeCount} public types ({classCount} classes, {interfaceCount} interfaces)");
+            if (methodCount > 0) sb.Append($", and {methodCount} public methods");
+            if (endpointCount > 0) sb.Append($". It exposes {endpointCount} API endpoints");
+            sb.AppendLine(".");
+
+            if (upstreamCount > 0)
+                sb.AppendLine($"It depends on {upstreamCount} internal packages.");
+            if (downstreamCount > 0)
+                sb.AppendLine($"{downstreamCount} other projects depend on it, making it a high-impact change target.");
+            if (diTypeCount > 0)
+                sb.AppendLine($"{diTypeCount} types use dependency injection.");
+
+            sb.AppendLine();
+
+            // Key types (top 10 by method count)
+            sb.AppendLine("## Key Types");
+            sb.AppendLine();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT t.type_name, t.kind, t.summary_comment,
+                        (SELECT COUNT(*) FROM methods m WHERE m.type_id = t.id) as method_count,
+                        (SELECT COUNT(*) FROM type_interfaces ti WHERE ti.type_id = t.id) as iface_count,
+                        (SELECT COUNT(*) FROM type_injected_deps tid WHERE tid.type_id = t.id) as di_count
+                    FROM types t
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    WHERE a.project_id = (SELECT id FROM projects WHERE name = @name) AND t.is_public = 1
+                    ORDER BY method_count DESC
+                    LIMIT 10";
+                cmd.Parameters.AddWithValue("@name", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var tName = reader.GetString(0);
+                    var kind = reader.GetString(1);
+                    var summary = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    var mc = reader.GetInt64(3);
+                    var ic = reader.GetInt64(4);
+                    var dc = reader.GetInt64(5);
+
+                    sb.Append($"- **{tName}** ({kind}, {mc} methods");
+                    if (ic > 0) sb.Append($", implements {ic} interfaces");
+                    if (dc > 0) sb.Append($", {dc} DI deps");
+                    sb.Append(")");
+                    if (!string.IsNullOrWhiteSpace(summary))
+                        sb.Append($" — {summary}");
+                    sb.AppendLine();
+                }
+            }
+
+            return sb.ToString();
+        }
+        finally { MaybeClose(conn); }
+    }
+
+    public string GenerateTypeSummary(string typeName)
+    {
+        _logger.LogDebug("Generating type summary for: {TypeName}", typeName);
+        var conn = GetConnection();
+        try
+        {
+            var sb = new StringBuilder();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT t.id, t.type_name, t.kind, t.is_public, t.file_path, t.base_type, t.summary_comment,
+                    n.namespace_name, a.assembly_name, p.name as project_name,
+                    (SELECT COUNT(*) FROM methods m WHERE m.type_id = t.id) as method_count
+                FROM types t
+                JOIN namespaces n ON t.namespace_id = n.id
+                JOIN assemblies a ON n.assembly_id = a.id
+                JOIN projects p ON a.project_id = p.id
+                WHERE t.type_name = @name";
+            cmd.Parameters.AddWithValue("@name", typeName);
+            using var reader = cmd.ExecuteReader();
+
+            if (!reader.Read())
+                return $"Type '{typeName}' not found.";
+
+            var typeDbId = reader.GetInt64(0);
+            var kind = reader.GetString(2);
+            var isPublic = reader.GetBoolean(3);
+            var filePath = reader.GetString(4);
+            var baseType = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var summary = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var ns = reader.GetString(7);
+            var assembly = reader.GetString(8);
+            var project = reader.GetString(9);
+            var methodCountVal = reader.GetInt64(10);
+            reader.Close();
+
+            // Get interfaces
+            var interfaces = new List<string>();
+            using (var ifCmd = conn.CreateCommand())
+            {
+                ifCmd.CommandText = "SELECT interface_name FROM type_interfaces WHERE type_id = @id";
+                ifCmd.Parameters.AddWithValue("@id", typeDbId);
+                using var ifReader = ifCmd.ExecuteReader();
+                while (ifReader.Read()) interfaces.Add(ifReader.GetString(0));
+            }
+
+            // Get DI dependencies
+            var diDeps = new List<string>();
+            using (var diCmd = conn.CreateCommand())
+            {
+                diCmd.CommandText = "SELECT dependency_type FROM type_injected_deps WHERE type_id = @id";
+                diCmd.Parameters.AddWithValue("@id", typeDbId);
+                using var diReader = diCmd.ExecuteReader();
+                while (diReader.Read()) diDeps.Add(diReader.GetString(0));
+            }
+
+            // Get implementor count (if interface)
+            long implementorCount = 0;
+            if (kind == "interface")
+            {
+                using var implCmd = conn.CreateCommand();
+                implCmd.CommandText = "SELECT COUNT(*) FROM type_interfaces WHERE interface_name = @name";
+                implCmd.Parameters.AddWithValue("@name", typeName);
+                implementorCount = (long)(implCmd.ExecuteScalar() ?? 0);
+            }
+
+            // Get who injects this type
+            long injectorCount = 0;
+            using (var injCmd = conn.CreateCommand())
+            {
+                injCmd.CommandText = "SELECT COUNT(*) FROM type_injected_deps WHERE dependency_type = @name";
+                injCmd.Parameters.AddWithValue("@name", typeName);
+                injectorCount = (long)(injCmd.ExecuteScalar() ?? 0);
+            }
+
+            // Build summary
+            sb.AppendLine($"# Type Summary: {typeName}");
+            sb.AppendLine();
+
+            // Natural language description
+            sb.Append($"**{typeName}** is a {(isPublic ? "public" : "internal")} {kind}");
+            sb.Append($" in the `{ns}` namespace, part of the **{project}** project");
+            if (baseType != null) sb.Append($", inheriting from `{baseType}`");
+            sb.AppendLine(".");
+
+            if (!string.IsNullOrWhiteSpace(summary))
+                sb.AppendLine($"\n> {summary}");
+
+            sb.AppendLine();
+
+            // Role analysis
+            var roles = new List<string>();
+            if (kind == "interface" && implementorCount > 0)
+                roles.Add($"contract with {implementorCount} known implementors");
+            if (interfaces.Count > 0)
+                roles.Add($"implements {string.Join(", ", interfaces.Select(i => $"`{i}`"))}");
+            if (diDeps.Count > 0)
+                roles.Add($"depends on {diDeps.Count} injected services ({string.Join(", ", diDeps.Select(d => $"`{d}`"))})");
+            if (injectorCount > 0)
+                roles.Add($"used as a dependency by {injectorCount} other types");
+            if (methodCountVal > 0)
+                roles.Add($"exposes {methodCountVal} public methods");
+
+            if (roles.Count > 0)
+            {
+                sb.AppendLine("## Characteristics");
+                sb.AppendLine();
+                foreach (var role in roles)
+                    sb.AppendLine($"- {role}");
+            }
+
+            // Complexity assessment
+            sb.AppendLine();
+            sb.AppendLine("## Complexity");
+            sb.AppendLine();
+            var complexity = "low";
+            if (methodCountVal > 15 || diDeps.Count > 5) complexity = "high";
+            else if (methodCountVal > 7 || diDeps.Count > 3) complexity = "medium";
+            sb.AppendLine($"- Complexity: **{complexity}** ({methodCountVal} methods, {diDeps.Count} dependencies)");
+            if (injectorCount > 5)
+                sb.AppendLine($"- ⚠ High coupling: {injectorCount} types depend on this — changes have wide blast radius");
+
+            sb.AppendLine();
+            sb.AppendLine($"*Location: `{filePath}` in assembly `{assembly}`*");
+
+            return sb.ToString();
         }
         finally { MaybeClose(conn); }
     }

@@ -74,4 +74,23 @@ public class TypeTools
             return ex.Message;
         }
     }
+
+    [McpServerTool(Name = "get_type_summary"), Description(
+        "Generate a natural-language summary of a type: what it is, its role, " +
+        "interfaces, dependencies, complexity assessment, and coupling analysis. " +
+        "Perfect for understanding unfamiliar types quickly.")]
+    public string GetTypeSummary(
+        [Description("Exact type name, e.g. 'QueryService'")] string typeName)
+    {
+        _logger.LogInformation("Tool {ToolName} invoked", "get_type_summary");
+        _logger.LogDebug("Parameters: typeName={TypeName}", typeName);
+        try
+        {
+            return _query.GenerateTypeSummary(typeName);
+        }
+        catch (DatabaseNotFoundException ex)
+        {
+            return ex.Message;
+        }
+    }
 }

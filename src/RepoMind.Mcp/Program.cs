@@ -24,6 +24,13 @@ if (args.Contains("--init"))
     return;
 }
 
+// Handle --doctor: diagnose RepoMind setup and optionally investigate a missing type
+if (args.Contains("--doctor"))
+{
+    RunDoctor(rootPath, args);
+    return;
+}
+
 if (!Directory.Exists(rootPath))
 {
     Console.Error.WriteLine($"Error: Root path does not exist: {rootPath}");
@@ -194,5 +201,210 @@ static async Task RunInit(string rootPath, string[] args)
     {
         Console.Error.WriteLine($"✗ Scan failed: {summary.Error}");
     }
+    Console.WriteLine("═══════════════════════════════════");
+}
+
+// --doctor implementation: diagnose setup and investigate missing types
+static void RunDoctor(string rootPath, string[] args)
+{
+    Console.WriteLine("╔══════════════════════════════════╗");
+    Console.WriteLine("║      RepoMind — Doctor           ║");
+    Console.WriteLine("╚══════════════════════════════════╝");
+    Console.WriteLine();
+
+    var allGood = true;
+
+    // 1. Check root path
+    if (Directory.Exists(rootPath))
+        Console.WriteLine($"✓ Root path exists: {rootPath}");
+    else
+    {
+        Console.Error.WriteLine($"✗ Root path does not exist: {rootPath}");
+        allGood = false;
+    }
+
+    // 2. Check git
+    try
+    {
+        var psi = new ProcessStartInfo("git", "--version")
+        {
+            RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true
+        };
+        using var proc = Process.Start(psi);
+        proc?.WaitForExit();
+        Console.WriteLine(proc?.ExitCode == 0 ? "✓ Git is available" : "✗ Git is not available");
+        if (proc?.ExitCode != 0) allGood = false;
+    }
+    catch { Console.Error.WriteLine("✗ Git is not available"); allGood = false; }
+
+    // 3. Check memory directory
+    var memoryDir = Path.Combine(rootPath, "memory");
+    if (Directory.Exists(memoryDir))
+        Console.WriteLine($"✓ Memory directory exists: {memoryDir}");
+    else
+    {
+        Console.Error.WriteLine($"✗ Memory directory not found: {memoryDir}");
+        Console.Error.WriteLine("  Run 'repomind --init' to create it.");
+        allGood = false;
+    }
+
+    // 4. Check database
+    var dbPath = Path.Combine(memoryDir, "repomind.db");
+    if (File.Exists(dbPath))
+    {
+        Console.WriteLine($"✓ Database exists: {dbPath}");
+        var fileSize = new FileInfo(dbPath).Length;
+        Console.WriteLine($"  Size: {fileSize / 1024.0:F1} KB");
+    }
+    else
+    {
+        Console.Error.WriteLine($"✗ Database not found: {dbPath}");
+        Console.Error.WriteLine("  Run 'repomind --init' to scan your codebase.");
+        allGood = false;
+        return;
+    }
+
+    // 5. Check database tables and contents
+    using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+    try
+    {
+        conn.Open();
+        Console.WriteLine("✓ Database is readable");
+
+        var tables = new[] { "projects", "assemblies", "namespaces", "types", "methods", "endpoints", "type_interfaces", "type_injected_deps", "package_references", "config_entries" };
+        var missingTables = new List<string>();
+        foreach (var table in tables)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'";
+            var exists = (long)(cmd.ExecuteScalar() ?? 0) > 0;
+            if (!exists) missingTables.Add(table);
+        }
+
+        if (missingTables.Count == 0)
+            Console.WriteLine($"✓ All {tables.Length} expected tables present");
+        else
+        {
+            Console.Error.WriteLine($"✗ Missing tables: {string.Join(", ", missingTables)}");
+            Console.Error.WriteLine("  Database may be corrupt. Run 'repomind --init' to rescan.");
+            allGood = false;
+        }
+
+        // 6. Check data counts
+        long projectCount = 0, typeCount = 0, endpointCount = 0;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM projects";
+            projectCount = (long)(cmd.ExecuteScalar() ?? 0);
+        }
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM types";
+            typeCount = (long)(cmd.ExecuteScalar() ?? 0);
+        }
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM endpoints";
+            endpointCount = (long)(cmd.ExecuteScalar() ?? 0);
+        }
+
+        Console.WriteLine($"  Projects: {projectCount}");
+        Console.WriteLine($"  Types:    {typeCount}");
+        Console.WriteLine($"  Endpoints: {endpointCount}");
+
+        if (projectCount == 0)
+        {
+            Console.Error.WriteLine("✗ No projects in database — scan may have failed");
+            allGood = false;
+        }
+        else
+            Console.WriteLine("✓ Database has data");
+
+        // 7. Check scan freshness
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='scan_metadata'";
+            if (cmd.ExecuteScalar() != null)
+            {
+                using var cmd2 = conn.CreateCommand();
+                cmd2.CommandText = "SELECT MAX(last_scan_utc) FROM scan_metadata";
+                var lastScan = cmd2.ExecuteScalar();
+                if (lastScan != null && lastScan != DBNull.Value)
+                    Console.WriteLine($"  Last scan: {lastScan}");
+            }
+        }
+
+        // 8. Check flat files
+        var flatFiles = new[] { "projects.json", "dependency-graph.json", "types-index.json" };
+        var missingFlat = flatFiles.Where(f => !File.Exists(Path.Combine(memoryDir, f))).ToList();
+        if (missingFlat.Count == 0)
+            Console.WriteLine($"✓ All {flatFiles.Length} flat files present");
+        else
+            Console.WriteLine($"⚠ Missing flat files: {string.Join(", ", missingFlat)}");
+
+        // 9. Type investigation (--type=TypeName)
+        var typeArg = args.FirstOrDefault(a => a.StartsWith("--type=", StringComparison.OrdinalIgnoreCase));
+        if (typeArg != null)
+        {
+            var targetType = typeArg.Substring("--type=".Length);
+            Console.WriteLine();
+            Console.WriteLine($"═══ Investigating type: {targetType} ═══");
+            Console.WriteLine();
+
+            // Check if type exists
+            using var findCmd = conn.CreateCommand();
+            findCmd.CommandText = @"
+                SELECT t.type_name, t.kind, t.is_public, t.file_path, n.namespace_name, a.assembly_name, p.name as project_name
+                FROM types t
+                JOIN namespaces n ON t.namespace_id = n.id
+                JOIN assemblies a ON n.assembly_id = a.id
+                JOIN projects p ON a.project_id = p.id
+                WHERE t.type_name LIKE @name";
+            findCmd.Parameters.AddWithValue("@name", $"%{targetType}%");
+            using var reader = findCmd.ExecuteReader();
+            var found = false;
+            while (reader.Read())
+            {
+                found = true;
+                Console.WriteLine($"✓ Found: {reader.GetString(4)}.{reader.GetString(0)}");
+                Console.WriteLine($"  Kind:     {reader.GetString(1)}");
+                Console.WriteLine($"  Public:   {(reader.GetBoolean(2) ? "yes" : "no")}");
+                Console.WriteLine($"  File:     {reader.GetString(3)}");
+                Console.WriteLine($"  Assembly: {reader.GetString(5)}");
+                Console.WriteLine($"  Project:  {reader.GetString(6)}");
+                Console.WriteLine();
+            }
+
+            if (!found)
+            {
+                Console.Error.WriteLine($"✗ Type '{targetType}' not found in the database");
+                Console.WriteLine();
+                Console.WriteLine("Possible reasons:");
+                Console.WriteLine("  • The type is not public (only public types are scanned)");
+                Console.WriteLine("  • The file is in a test/benchmark project (excluded by default)");
+                Console.WriteLine("  • The project containing it was not detected as a git repo");
+                Console.WriteLine("  • The file failed to parse (check scanner output)");
+                Console.WriteLine("  • The type is defined in a file excluded by obj/bin filters");
+
+                // Check if project is scanned
+                Console.WriteLine();
+                Console.WriteLine("Scanned projects:");
+                using var projCmd = conn.CreateCommand();
+                projCmd.CommandText = "SELECT name FROM projects ORDER BY name";
+                using var projReader = projCmd.ExecuteReader();
+                while (projReader.Read())
+                    Console.WriteLine($"  • {projReader.GetString(0)}");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"✗ Cannot read database: {ex.Message}");
+        allGood = false;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("═══════════════════════════════════");
+    Console.WriteLine(allGood ? "✓ RepoMind is healthy!" : "⚠ Issues found. See details above.");
     Console.WriteLine("═══════════════════════════════════");
 }

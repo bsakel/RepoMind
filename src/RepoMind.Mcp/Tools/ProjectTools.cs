@@ -55,6 +55,7 @@ public class ProjectTools
     [McpServerTool(Name = "get_dependency_graph"), Description(
         "Show upstream dependencies (what a project consumes) and " +
         "downstream dependents (what consumes this project). " +
+        "Includes a Mermaid diagram for visualization. " +
         "Helps understand blast radius of changes.")]
     public string GetDependencyGraph(
         [Description("Project name, e.g. 'acme.core'")]
@@ -65,6 +66,26 @@ public class ProjectTools
         try
         {
             return _query.GetDependencyGraph(projectName);
+        }
+        catch (DatabaseNotFoundException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    [McpServerTool(Name = "get_project_summary"), Description(
+        "Generate a natural-language summary of a project: its role (API service, library, etc.), " +
+        "key statistics, dependency relationships, and top types. " +
+        "Great for onboarding and understanding what a project does at a glance.")]
+    public string GetProjectSummary(
+        [Description("Project name, e.g. 'acme.api' or partial match like 'api'")]
+        string projectName)
+    {
+        _logger.LogInformation("Tool {ToolName} invoked", "get_project_summary");
+        _logger.LogDebug("Parameters: projectName={ProjectName}", projectName);
+        try
+        {
+            return _query.GenerateProjectSummary(projectName);
         }
         catch (DatabaseNotFoundException ex)
         {

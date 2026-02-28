@@ -250,4 +250,106 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
         result.Should().Contain("projects");
         result.Should().Contain("types");
     }
+
+    // Mermaid diagram tests
+
+    [Fact]
+    public void TraceFlow_IncludesMermaidDiagram()
+    {
+        var result = _sut.TraceFlow("ICoherentCache", 3);
+
+        result.Should().Contain("```mermaid");
+        result.Should().Contain("graph LR");
+        result.Should().Contain("-->");
+        result.Should().Contain("```", Exactly.Twice());
+    }
+
+    [Fact]
+    public void TraceFlow_NoConnections_DoesNotIncludeMermaid()
+    {
+        var result = _sut.TraceFlow("EntityStatus", 3);
+
+        result.Should().NotContain("```mermaid");
+        result.Should().Contain("No flow connections found");
+    }
+
+    [Fact]
+    public void AnalyzeImpact_IncludesMermaidDiagram()
+    {
+        var result = _sut.AnalyzeImpact("ICoherentCache");
+
+        result.Should().Contain("```mermaid");
+        result.Should().Contain("graph TD");
+        result.Should().Contain("Impact Graph");
+    }
+
+    [Fact]
+    public void GetDependencyGraph_IncludesMermaidDiagram()
+    {
+        var result = _sut.GetDependencyGraph("acme.web.api");
+
+        result.Should().Contain("Dependency Diagram");
+        result.Should().Contain("```mermaid");
+        result.Should().Contain("graph LR");
+    }
+
+    // Semantic summary tests
+
+    [Fact]
+    public void GenerateProjectSummary_ReturnsNaturalLanguageSummary()
+    {
+        var result = _sut.GenerateProjectSummary("acme.core");
+
+        result.Should().Contain("# Project Summary: acme.core");
+        result.Should().Contain("assemblies");
+        result.Should().Contain("public types");
+        result.Should().Contain("Key Types");
+    }
+
+    [Fact]
+    public void GenerateProjectSummary_NotFound_ReturnsMessage()
+    {
+        var result = _sut.GenerateProjectSummary("nonexistent");
+
+        result.Should().Contain("not found");
+    }
+
+    [Fact]
+    public void GenerateTypeSummary_ReturnsDetailedSummary()
+    {
+        var result = _sut.GenerateTypeSummary("CoherentCacheService");
+
+        result.Should().Contain("# Type Summary: CoherentCacheService");
+        result.Should().Contain("class");
+        result.Should().Contain("Characteristics");
+        result.Should().Contain("Complexity");
+        result.Should().Contain("ICoherentCache");
+    }
+
+    [Fact]
+    public void GenerateTypeSummary_Interface_ShowsImplementorCount()
+    {
+        var result = _sut.GenerateTypeSummary("ICoherentCache");
+
+        result.Should().Contain("interface");
+        result.Should().Contain("contract with");
+        result.Should().Contain("implementors");
+    }
+
+    [Fact]
+    public void GenerateTypeSummary_NotFound_ReturnsMessage()
+    {
+        var result = _sut.GenerateTypeSummary("NonexistentType");
+
+        result.Should().Contain("not found");
+    }
+
+    [Fact]
+    public void GenerateTypeSummary_IncludesDependencyInfo()
+    {
+        var result = _sut.GenerateTypeSummary("CacheEvictionHandler");
+
+        result.Should().Contain("depends on");
+        result.Should().Contain("injected services");
+    }
 }

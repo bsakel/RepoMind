@@ -65,7 +65,7 @@ dotnet test RepoMind.slnx
 |------|-------------|
 | `list_projects` | List all scanned projects |
 | `get_project_info` | Detailed info for a specific project |
-| `get_dependency_graph` | NuGet dependency relationships |
+| `get_dependency_graph` | NuGet dependency relationships (with Mermaid diagram) |
 | `search_types` | Find types by name pattern |
 | `find_implementors` | Find types implementing an interface |
 | `find_type_details` | Full type info (interfaces, DI deps) |
@@ -73,8 +73,8 @@ dotnet test RepoMind.slnx
 | `search_endpoints` | Find REST/GraphQL endpoints by route |
 | `search_methods` | Find public methods by name pattern |
 | `search_config` | Find config keys (appsettings, env vars, IConfiguration) |
-| `trace_flow` | Trace type usage chains across projects |
-| `analyze_impact` | Blast radius analysis for type changes |
+| `trace_flow` | Trace type usage chains across projects (with Mermaid diagram) |
+| `analyze_impact` | Blast radius analysis for type changes (with Mermaid diagram) |
 | `get_package_versions` | NuGet package version usage |
 | `update_repos` | Git pull all repos (with optional auto-rescan) |
 | `get_repo_status` | Git status across all repos |
@@ -83,6 +83,8 @@ dotnet test RepoMind.slnx
 | `generate_agents_md` | Auto-generate AGENTS.md for the codebase |
 | `check_version_alignment` | Detect NuGet version mismatches (MAJOR/MINOR) |
 | `find_untested_types` | Find production types without test classes |
+| `get_project_summary` | Natural-language project summary with role analysis |
+| `get_type_summary` | Natural-language type summary with complexity assessment |
 
 ## Configuration (MCP Server)
 
@@ -92,6 +94,11 @@ The MCP server resolves the target codebase root path via:
 3. Current working directory (fallback)
 
 The `memory/` output directory is always `<RootPath>/memory/`.
+
+### CLI Commands
+
+- `--init` — Validate environment, scan codebase, output setup summary
+- `--doctor` — Diagnose setup issues, check database health, investigate missing types (`--type=TypeName`)
 
 ## Flat File Workflow (No MCP)
 

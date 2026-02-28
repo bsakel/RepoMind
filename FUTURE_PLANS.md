@@ -19,12 +19,8 @@ If one project has a malformed csproj or Roslyn can't parse a file, the scan wra
 
 ## 🧠 High Impact — Deeper Intelligence
 
-### 4. Semantic summaries
-Move beyond structural data (types, methods, parameters) to capture *intent*. Use XML doc comments, method body analysis, and naming conventions to generate natural-language summaries:
-- Instead of: `UserService: class, 5 methods, implements IUserService`
-- Generate: `UserService: Core domain service handling user lifecycle — registration, auth, profile updates. 12 downstream dependents.`
-
-Could be pure heuristic or optionally backed by an LLM pass over scanned data.
+### 4. Semantic summaries ✅ Implemented
+Move beyond structural data (types, methods, parameters) to capture *intent*. Uses XML doc comments, method counts, interface relationships, DI dependency counts, and naming conventions to generate natural-language summaries via `get_project_summary` and `get_type_summary` MCP tools.
 
 ### 5. Architecture pattern detection
 Automatically detect and label common patterns in the codebase:
@@ -35,15 +31,8 @@ Automatically detect and label common patterns in the codebase:
 
 The signals are already in the scanned data — interface names, DI registrations, naming conventions. Label them so AI agents get instant architectural context.
 
-### 6. Mermaid flow diagrams
-The `trace_flow` tool returns markdown text. Enhance it to generate Mermaid diagrams:
-```mermaid
-graph LR
-    IUserService --> UserService
-    UserService --> UserRepository
-    AuthController --> IUserService
-```
-Every AI agent and modern dev tool can render Mermaid. Visual dependency chains are immediately understandable.
+### 6. Mermaid flow diagrams ✅ Implemented
+The `trace_flow`, `analyze_impact`, and `get_dependency_graph` tools now include Mermaid diagram blocks alongside their markdown output. Every AI agent and modern dev tool can render Mermaid for visual dependency chains.
 
 ---
 
@@ -71,8 +60,8 @@ Let AI agents decide formatting. Enables pagination, smarter follow-up queries, 
 
 ## 💡 Nice to Have — Polish & Delight
 
-### 11. `repomind doctor` — self-diagnostics
-A diagnostics command for debugging "why isn't my type showing up?" scenarios. Checks: database exists, schema version matches, project was scanned, file was included (not filtered as test/benchmark), type is public, etc. Walks users through common issues.
+### 11. `repomind doctor` — self-diagnostics ✅ Implemented
+A `--doctor` CLI flag that checks: database exists, schema tables present, data counts, scan freshness, flat file presence. Supports `--type=TypeName` to investigate why a specific type is missing (checks visibility, project inclusion, test/benchmark filtering).
 
 ### 12. Cross-repo change impact stories
 Instead of blast radius lists, generate narrative:
@@ -97,14 +86,14 @@ Cache MCP tool query results with a short TTL (30s). The database is read-only b
 | 1 | `repomind init` | Small | ✅ Done |
 | 2 | Progress feedback | Small | ✅ Done |
 | 3 | Resilient scanning | Small | ✅ Done |
-| 4 | Semantic summaries | Medium | Planned |
+| 4 | Semantic summaries | Medium | ✅ Done |
 | 5 | Pattern detection | Medium | Planned |
-| 6 | Mermaid diagrams | Medium | Planned |
+| 6 | Mermaid diagrams | Medium | ✅ Done |
 | 7 | Watch mode | Medium | Planned |
 | 8 | TypeScript support | Large | Planned |
 | 9 | Docker + CI | Medium | Planned |
 | 10 | Structured results | Medium | Planned |
-| 11 | Doctor command | Small | Planned |
+| 11 | Doctor command | Small | ✅ Done |
 | 12 | Impact stories | Medium | Planned |
 | 13 | Enhanced AGENTS.md | Medium | Planned |
 | 14 | Query caching | Small | Planned |
