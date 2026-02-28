@@ -22,7 +22,7 @@ src/
       GitService.cs                         # Git operations (pull, status, branch)
       ScannerService.cs                     # In-process scanner invocation
       ProcessRunner.cs                      # IProcessRunner abstraction
-    Tools/                                  # MCP tool definitions (5 files)
+    Tools/                                  # MCP tool definitions (10 files)
 
   RepoMind.Scanner/                         # Roslyn scanner (library + CLI)
     Program.cs                              # Thin CLI wrapper

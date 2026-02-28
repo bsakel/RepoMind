@@ -80,6 +80,7 @@ dotnet publish src/RepoMind.Mcp -c Release -o ~/.repomind
 Or install as a dotnet tool:
 
 ```bash
+dotnet pack src/RepoMind.Mcp -c Release -o ./nupkg
 dotnet tool install --global RepoMind --add-source ./nupkg
 # Then use: "command": "repomind"
 ```
@@ -130,7 +131,7 @@ Files are written to `<root>/memory/`:
 grep -r "UserService" memory/types-index.json
 
 # Find all REST endpoints
-grep -r "\[GET\]\|\[POST\]\|\[PUT\]\|\[DELETE\]" memory/projects/
+grep -rE "\[GET\]|\[POST\]|\[PUT\]|\[DELETE\]" memory/projects/
 
 # Find config keys across projects
 grep -r "ConnectionString" memory/projects/
