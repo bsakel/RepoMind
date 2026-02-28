@@ -21,6 +21,15 @@ public class QueryService
     private const string NoDatabaseMessage =
         "⚠️ Memory database not found. Run the `rescan_memory` tool first to scan your codebase.";
 
+    private const string CreateTypeWithProjectView = @"
+        CREATE TEMP VIEW IF NOT EXISTS type_with_project AS
+        SELECT t.*, n.namespace_name, a.assembly_name, a.target_framework,
+               a.is_test, p.name AS project_name, p.git_remote_url
+        FROM types t
+        JOIN namespaces n ON t.namespace_id = n.id
+        JOIN assemblies a ON n.assembly_id = a.id
+        JOIN projects p ON a.project_id = p.id";
+
     private SqliteConnection OpenConnection()
     {
         if (!File.Exists(_config.DbPath))
@@ -35,7 +44,20 @@ public class QueryService
         return conn;
     }
 
-    private SqliteConnection GetConnection() => _connectionFactory?.Invoke() ?? OpenConnection();
+    private SqliteConnection GetConnection()
+    {
+        var conn = _connectionFactory?.Invoke() ?? OpenConnection();
+        EnsureViews(conn);
+        return conn;
+    }
+
+    private void EnsureViews(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = CreateTypeWithProjectView;
+        cmd.ExecuteNonQuery();
+    }
+
     private bool OwnsConnection => _connectionFactory == null;
 
     private void MaybeClose(SqliteConnection conn)
@@ -183,13 +205,10 @@ public class QueryService
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
-                    SELECT t.type_name, t.kind, n.namespace_name
-                    FROM types t
-                    JOIN namespaces n ON t.namespace_id = n.id
-                    JOIN assemblies a ON n.assembly_id = a.id
-                    JOIN projects p ON a.project_id = p.id
-                    WHERE p.name = @name AND t.is_public = 1
-                    ORDER BY t.kind, t.type_name
+                    SELECT type_name, kind, namespace_name
+                    FROM type_with_project
+                    WHERE project_name = @name AND is_public = 1
+                    ORDER BY kind, type_name
                     LIMIT 30";
                 cmd.Parameters.AddWithValue("@name", resolvedName);
                 using var reader = cmd.ExecuteReader();
@@ -282,33 +301,30 @@ public class QueryService
             var sqlPattern = ToSqlPattern(namePattern);
 
             using var cmd = conn.CreateCommand();
-            var where = new List<string> { "t.type_name LIKE @pattern" };
+            var where = new List<string> { "type_name LIKE @pattern" };
             cmd.Parameters.AddWithValue("@pattern", sqlPattern);
 
             if (!string.IsNullOrEmpty(namespaceName))
             {
-                where.Add("n.namespace_name LIKE @ns");
+                where.Add("namespace_name LIKE @ns");
                 cmd.Parameters.AddWithValue("@ns", ToSqlPattern(namespaceName));
             }
             if (!string.IsNullOrEmpty(kind))
             {
-                where.Add("t.kind = @kind");
+                where.Add("kind = @kind");
                 cmd.Parameters.AddWithValue("@kind", kind.ToLowerInvariant());
             }
             if (!string.IsNullOrEmpty(projectName))
             {
-                where.Add("p.name LIKE @proj");
+                where.Add("project_name LIKE @proj");
                 cmd.Parameters.AddWithValue("@proj", $"%{projectName}%");
             }
 
             cmd.CommandText = $@"
-                SELECT t.type_name, t.kind, n.namespace_name, p.name, t.file_path
-                FROM types t
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
+                SELECT type_name, kind, namespace_name, project_name, file_path
+                FROM type_with_project
                 WHERE {string.Join(" AND ", where)}
-                ORDER BY p.name, n.namespace_name, t.type_name
+                ORDER BY project_name, namespace_name, type_name
                 LIMIT 50";
 
             using var reader = cmd.ExecuteReader();
@@ -333,14 +349,11 @@ public class QueryService
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT t.type_name, t.kind, n.namespace_name, p.name, t.file_path, ti.interface_name
-                FROM types t
-                JOIN type_interfaces ti ON ti.type_id = t.id
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
+                SELECT v.type_name, v.kind, v.namespace_name, v.project_name, v.file_path, ti.interface_name
+                FROM type_with_project v
+                JOIN type_interfaces ti ON ti.type_id = v.id
                 WHERE ti.interface_name LIKE @iface
-                ORDER BY p.name, t.type_name
+                ORDER BY v.project_name, v.type_name
                 LIMIT 100";
             cmd.Parameters.AddWithValue("@iface", sqlPattern);
 
@@ -364,13 +377,10 @@ public class QueryService
         {
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT t.id, t.type_name, t.kind, t.is_public, t.file_path, t.base_type, t.summary_comment,
-                       n.namespace_name, p.name
-                FROM types t
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
-                WHERE t.type_name = @name
+                SELECT id, type_name, kind, is_public, file_path, base_type, summary_comment,
+                       namespace_name, project_name
+                FROM type_with_project
+                WHERE type_name = @name
                 LIMIT 5";
             cmd.Parameters.AddWithValue("@name", typeName);
 
@@ -433,14 +443,11 @@ public class QueryService
 
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT t.type_name, n.namespace_name, p.name, t.file_path, tid.dependency_type
+                SELECT v.type_name, v.namespace_name, v.project_name, v.file_path, tid.dependency_type
                 FROM type_injected_deps tid
-                JOIN types t ON tid.type_id = t.id
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
+                JOIN type_with_project v ON tid.type_id = v.id
                 WHERE tid.dependency_type LIKE @dep
-                ORDER BY p.name, t.type_name
+                ORDER BY v.project_name, v.type_name
                 LIMIT 100";
             cmd.Parameters.AddWithValue("@dep", sqlPattern);
 
@@ -531,13 +538,10 @@ public class QueryService
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
                 SELECT e.http_method, e.route_template, e.endpoint_kind,
-                       m.method_name, t.type_name, n.namespace_name, p.name, t.file_path
+                       m.method_name, v.type_name, v.namespace_name, v.project_name, v.file_path
                 FROM endpoints e
                 JOIN methods m ON e.method_id = m.id
-                JOIN types t ON e.type_id = t.id
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
+                JOIN type_with_project v ON e.type_id = v.id
                 WHERE e.route_template LIKE @pattern
                    OR m.method_name LIKE @pattern
                 ORDER BY e.endpoint_kind, e.http_method, e.route_template
@@ -579,19 +583,16 @@ public class QueryService
             }
             if (!string.IsNullOrEmpty(projectName))
             {
-                where.Add("p.name LIKE @proj");
+                where.Add("v.project_name LIKE @proj");
                 cmd.Parameters.AddWithValue("@proj", $"%{projectName}%");
             }
 
             cmd.CommandText = $@"
-                SELECT m.method_name, m.return_type, t.type_name, n.namespace_name, p.name, t.file_path
+                SELECT m.method_name, m.return_type, v.type_name, v.namespace_name, v.project_name, v.file_path
                 FROM methods m
-                JOIN types t ON m.type_id = t.id
-                JOIN namespaces n ON t.namespace_id = n.id
-                JOIN assemblies a ON n.assembly_id = a.id
-                JOIN projects p ON a.project_id = p.id
+                JOIN type_with_project v ON m.type_id = v.id
                 WHERE {string.Join(" AND ", where)}
-                ORDER BY p.name, t.type_name, m.method_name
+                ORDER BY v.project_name, v.type_name, m.method_name
                 LIMIT 100";
 
             using var reader = cmd.ExecuteReader();
@@ -755,13 +756,10 @@ public class QueryService
                 sb.AppendLine();
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = @"
-                    SELECT e.http_method, e.route_template, e.endpoint_kind, t.type_name, p.name
+                    SELECT e.http_method, e.route_template, e.endpoint_kind, v.type_name, v.project_name
                     FROM endpoints e
                     JOIN methods m ON e.method_id = m.id
-                    JOIN types t ON e.type_id = t.id
-                    JOIN namespaces n ON t.namespace_id = n.id
-                    JOIN assemblies a ON n.assembly_id = a.id
-                    JOIN projects p ON a.project_id = p.id
+                    JOIN type_with_project v ON e.type_id = v.id
                     ORDER BY e.endpoint_kind, e.http_method, e.route_template
                     LIMIT 50";
                 using var reader = cmd.ExecuteReader();
@@ -781,14 +779,11 @@ public class QueryService
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
-                    SELECT t.type_name, n.namespace_name, p.name,
-                        (SELECT COUNT(*) FROM type_interfaces ti WHERE ti.interface_name = t.type_name) as impl_count
-                    FROM types t
-                    JOIN namespaces n ON t.namespace_id = n.id
-                    JOIN assemblies a ON n.assembly_id = a.id
-                    JOIN projects p ON a.project_id = p.id
-                    WHERE t.kind = 'interface' AND t.is_public = 1
-                    ORDER BY impl_count DESC, t.type_name
+                    SELECT type_name, namespace_name, project_name,
+                        (SELECT COUNT(*) FROM type_interfaces ti WHERE ti.interface_name = type_name) as impl_count
+                    FROM type_with_project
+                    WHERE kind = 'interface' AND is_public = 1
+                    ORDER BY impl_count DESC, type_name
                     LIMIT 20";
                 using var reader = cmd.ExecuteReader();
                 sb.AppendLine("| Interface | Namespace | Project | Implementors |");
@@ -903,11 +898,8 @@ public class QueryService
 
         // Find implementors of this type (if it's an interface)
         var implementors = QueryTypeList(conn,
-            "SELECT DISTINCT t.type_name, p.name FROM types t " +
-            "JOIN type_interfaces ti ON ti.type_id = t.id " +
-            "JOIN namespaces n ON t.namespace_id = n.id " +
-            "JOIN assemblies a ON n.assembly_id = a.id " +
-            "JOIN projects p ON a.project_id = p.id " +
+            "SELECT DISTINCT v.type_name, v.project_name FROM type_with_project v " +
+            "JOIN type_interfaces ti ON ti.type_id = v.id " +
             "WHERE ti.interface_name = @name", typeName);
 
         if (implementors.Count > 0)
@@ -930,11 +922,8 @@ public class QueryService
         var indent = new string(' ', depth * 2);
 
         var injectors = QueryTypeList(conn,
-            "SELECT DISTINCT t.type_name, p.name FROM types t " +
-            "JOIN type_injected_deps tid ON tid.type_id = t.id " +
-            "JOIN namespaces n ON t.namespace_id = n.id " +
-            "JOIN assemblies a ON n.assembly_id = a.id " +
-            "JOIN projects p ON a.project_id = p.id " +
+            "SELECT DISTINCT v.type_name, v.project_name FROM type_with_project v " +
+            "JOIN type_injected_deps tid ON tid.type_id = v.id " +
             "WHERE tid.dependency_type = @name", typeName);
 
         if (injectors.Count > 0)
@@ -973,11 +962,8 @@ public class QueryService
 
             // Find the type's home project
             var homeProjects = QueryTypeList(conn,
-                "SELECT t.type_name, p.name FROM types t " +
-                "JOIN namespaces n ON t.namespace_id = n.id " +
-                "JOIN assemblies a ON n.assembly_id = a.id " +
-                "JOIN projects p ON a.project_id = p.id " +
-                "WHERE t.type_name = @name AND t.is_public = 1", typeName);
+                "SELECT type_name, project_name FROM type_with_project " +
+                "WHERE type_name = @name AND is_public = 1", typeName);
 
             if (homeProjects.Count == 0)
             {
@@ -991,29 +977,20 @@ public class QueryService
 
             // Direct references: implementors
             var implementors = QueryTypeList(conn,
-                "SELECT DISTINCT t.type_name, p.name FROM types t " +
-                "JOIN type_interfaces ti ON ti.type_id = t.id " +
-                "JOIN namespaces n ON t.namespace_id = n.id " +
-                "JOIN assemblies a ON n.assembly_id = a.id " +
-                "JOIN projects p ON a.project_id = p.id " +
+                "SELECT DISTINCT v.type_name, v.project_name FROM type_with_project v " +
+                "JOIN type_interfaces ti ON ti.type_id = v.id " +
                 "WHERE ti.interface_name = @name", typeName);
 
             // Direct references: injectors
             var injectors = QueryTypeList(conn,
-                "SELECT DISTINCT t.type_name, p.name FROM types t " +
-                "JOIN type_injected_deps tid ON tid.type_id = t.id " +
-                "JOIN namespaces n ON t.namespace_id = n.id " +
-                "JOIN assemblies a ON n.assembly_id = a.id " +
-                "JOIN projects p ON a.project_id = p.id " +
+                "SELECT DISTINCT v.type_name, v.project_name FROM type_with_project v " +
+                "JOIN type_injected_deps tid ON tid.type_id = v.id " +
                 "WHERE tid.dependency_type = @name", typeName);
 
             // Direct references: base type usage
             var inheritors = QueryTypeList(conn,
-                "SELECT DISTINCT t.type_name, p.name FROM types t " +
-                "JOIN namespaces n ON t.namespace_id = n.id " +
-                "JOIN assemblies a ON n.assembly_id = a.id " +
-                "JOIN projects p ON a.project_id = p.id " +
-                "WHERE t.base_type = @name", typeName);
+                "SELECT DISTINCT type_name, project_name FROM type_with_project " +
+                "WHERE base_type = @name", typeName);
 
             var directProjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var allReferences = new List<(string TypeName, string Project, string Relation)>();
