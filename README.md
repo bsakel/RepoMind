@@ -205,7 +205,7 @@ src/
   RepoMind.Scanner.Cli/              # Scanner CLI entry point
 
 tests/
-  RepoMind.Mcp.Tests/               # xUnit tests (99 tests)
+  RepoMind.Mcp.Tests/               # xUnit tests (105 tests)
   RepoMind.Scanner.Tests/           # xUnit tests (18 tests)
 
 memory/                              # Generated scanner output

@@ -71,12 +71,15 @@ A `--doctor` CLI flag that checks: database exists, schema tables present, data 
 Instead of blast radius lists, generate narrative:
 > "Changing `IUserRepository` affects: `UserService` (direct consumer in Acme.Core), `AuthController` (indirect via UserService in Acme.Web.Api), and 3 test fixtures. The interface is also referenced as a NuGet package by the Billing team's repo."
 
-### 13. Enhanced AGENTS.md generation
-Level up `generate_agents_md` to produce a true onboarding document:
-- Key architecture patterns detected in the codebase
-- Common development flows ("to add a new endpoint, modify these files")
-- Known gotchas ("all DB access goes through IRepository, never use DbContext directly")
-- Team conventions inferred from code patterns
+### 13. Enhanced AGENTS.md generation ✅ Implemented
+`generate_agents_md` now produces a comprehensive onboarding document including:
+- Project table with auto-detected roles (API, Contracts, Library)
+- Internal dependency Mermaid diagram
+- Architecture patterns (Repository, Decorator, CQRS, Options, Service Layer)
+- Key DI dependencies (most-injected types, excluding ILogger/IOptions)
+- Naming conventions (auto-detected suffixes: Controller, Service, Handler, etc.)
+- Common development flows (endpoint → service → data access chains)
+- Complexity warnings (God classes with 5+ dependencies)
 
 ### 14. Query caching with TTL
 Cache MCP tool query results with a short TTL (30s). The database is read-only between scans, so results won't change. Reduces repeated query overhead when an AI agent iterates on the same question.
@@ -99,5 +102,5 @@ Cache MCP tool query results with a short TTL (30s). The database is read-only b
 | 10 | Structured results | Medium | Planned |
 | 11 | Doctor command | Small | ✅ Done |
 | 12 | Impact stories | Medium | Planned |
-| 13 | Enhanced AGENTS.md | Medium | Planned |
+| 13 | Enhanced AGENTS.md | Medium | ✅ Done |
 | 14 | Query caching | Small | ✅ Done |

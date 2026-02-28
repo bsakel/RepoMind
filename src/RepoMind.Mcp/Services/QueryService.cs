@@ -699,7 +699,7 @@ public class QueryService
                 $"**{typeCount} public types**, and **{endpointCount} endpoints**.");
             sb.AppendLine();
 
-            // Projects list
+            // Projects with role summaries
             sb.AppendLine("## Projects");
             sb.AppendLine();
             using (var cmd = conn.CreateCommand())
@@ -710,23 +710,47 @@ public class QueryService
                         (SELECT COUNT(*) FROM types t
                          JOIN namespaces n ON t.namespace_id = n.id
                          JOIN assemblies a ON n.assembly_id = a.id
-                         WHERE a.project_id = p.id AND t.is_public = 1) as type_count
+                         WHERE a.project_id = p.id AND t.is_public = 1) as type_count,
+                        (SELECT COUNT(*) FROM endpoints e
+                         JOIN types t ON e.type_id = t.id
+                         JOIN namespaces n ON t.namespace_id = n.id
+                         JOIN assemblies a ON n.assembly_id = a.id
+                         WHERE a.project_id = p.id) as endpoint_count,
+                        (SELECT COUNT(*) FROM types t
+                         JOIN namespaces n ON t.namespace_id = n.id
+                         JOIN assemblies a ON n.assembly_id = a.id
+                         WHERE a.project_id = p.id AND t.kind = 'interface') as iface_count,
+                        (SELECT COUNT(*) FROM types t
+                         JOIN namespaces n ON t.namespace_id = n.id
+                         JOIN assemblies a ON n.assembly_id = a.id
+                         WHERE a.project_id = p.id AND t.kind = 'class') as class_count
                     FROM projects p ORDER BY p.name";
                 using var reader = cmd.ExecuteReader();
-                sb.AppendLine("| Project | Assemblies | Public Types |");
+                sb.AppendLine("| Project | Types | Role |");
                 sb.AppendLine("| --- | --- | --- |");
                 while (reader.Read())
                 {
-                    sb.AppendLine($"| {reader.GetString(0)} | {reader.GetInt64(2)} | {reader.GetInt64(3)} |");
+                    var pName = reader.GetString(0);
+                    var tCount = reader.GetInt64(3);
+                    var epCount = reader.GetInt64(4);
+                    var ifCount = reader.GetInt64(5);
+                    var clCount = reader.GetInt64(6);
+
+                    var roles = new List<string>();
+                    if (epCount > 0) roles.Add("API");
+                    if (ifCount > clCount && ifCount > 0) roles.Add("Contracts");
+                    else if (clCount > 0 && ifCount == 0 && epCount == 0) roles.Add("Library");
+                    if (roles.Count == 0) roles.Add("Library");
+
+                    sb.AppendLine($"| {pName} | {tCount} | {string.Join(", ", roles)} |");
                 }
             }
             sb.AppendLine();
 
-            // Dependency graph
+            // Internal dependency graph with Mermaid
             sb.AppendLine("## Internal Dependencies");
             sb.AppendLine();
-            sb.AppendLine("Projects that consume other projects via internal packages:");
-            sb.AppendLine();
+            var depEdges = new List<(string consumer, string dependency)>();
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
@@ -742,6 +766,7 @@ public class QueryService
                 {
                     var project = reader.GetString(0);
                     var dep = reader.GetString(1);
+                    depEdges.Add((project, dep));
                     if (project != current)
                     {
                         if (current != "") sb.AppendLine();
@@ -757,7 +782,110 @@ public class QueryService
             }
             sb.AppendLine();
 
-            // Conventions (auto-detected)
+            if (depEdges.Count > 0)
+            {
+                sb.AppendLine("```mermaid");
+                sb.AppendLine("graph LR");
+                foreach (var (consumer, dep) in depEdges)
+                    sb.AppendLine($"    {SanitizeMermaidId(consumer)} --> {SanitizeMermaidId(dep)}");
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            // Architecture patterns (inline, not calling DetectPatterns to avoid double-open)
+            sb.AppendLine("## Architecture Patterns");
+            sb.AppendLine();
+            var patternLines = new List<string>();
+
+            // Repository pattern
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(*) FROM type_interfaces ti
+                    WHERE ti.interface_name LIKE 'IRepository%' OR ti.interface_name LIKE 'I%Repository'";
+                var count = (long)(cmd.ExecuteScalar() ?? 0);
+                if (count > 0) patternLines.Add($"- **Repository Pattern** — {count} repository implementations found");
+            }
+
+            // Decorator pattern
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(DISTINCT t.id) FROM types t
+                    JOIN type_interfaces ti ON ti.type_id = t.id
+                    JOIN type_injected_deps tid ON tid.type_id = t.id
+                    WHERE tid.dependency_type = ti.interface_name";
+                var count = (long)(cmd.ExecuteScalar() ?? 0);
+                if (count > 0) patternLines.Add($"- **Decorator Pattern** — {count} types wrap an interface they implement");
+            }
+
+            // CQRS
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(*) FROM types t
+                    WHERE t.type_name LIKE '%CommandHandler' OR t.type_name LIKE '%QueryHandler'
+                    OR EXISTS (SELECT 1 FROM type_interfaces ti WHERE ti.type_id = t.id
+                               AND (ti.interface_name LIKE 'IRequestHandler%' OR ti.interface_name LIKE 'INotificationHandler%'))";
+                var count = (long)(cmd.ExecuteScalar() ?? 0);
+                if (count > 0) patternLines.Add($"- **CQRS / Mediator** — {count} command/query handlers");
+            }
+
+            // Options pattern
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(DISTINCT type_id) FROM type_injected_deps WHERE dependency_type LIKE 'IOptions<%>'";
+                var count = (long)(cmd.ExecuteScalar() ?? 0);
+                if (count > 0) patternLines.Add($"- **Options Pattern** — {count} types use `IOptions<T>` for configuration");
+            }
+
+            // Service layer
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT COUNT(DISTINCT ti.type_id) FROM type_interfaces ti
+                    JOIN types t ON ti.type_id = t.id
+                    WHERE ti.interface_name LIKE 'I%Service' AND t.kind = 'class'";
+                var count = (long)(cmd.ExecuteScalar() ?? 0);
+                if (count > 0) patternLines.Add($"- **Service Layer** — {count} service implementations (`I*Service`)");
+            }
+
+            if (patternLines.Count > 0)
+                foreach (var line in patternLines) sb.AppendLine(line);
+            else
+                sb.AppendLine("No common architecture patterns detected.");
+            sb.AppendLine();
+
+            // Key DI registrations — most-injected types
+            sb.AppendLine("## Key Dependencies (Most Injected)");
+            sb.AppendLine();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT tid.dependency_type, COUNT(DISTINCT tid.type_id) as consumer_count
+                    FROM type_injected_deps tid
+                    WHERE tid.dependency_type NOT LIKE 'ILogger%'
+                      AND tid.dependency_type NOT LIKE 'IOptions%'
+                    GROUP BY tid.dependency_type
+                    HAVING consumer_count >= 2
+                    ORDER BY consumer_count DESC
+                    LIMIT 15";
+                using var reader = cmd.ExecuteReader();
+                var found = false;
+                sb.AppendLine("| Dependency | Used By |");
+                sb.AppendLine("| --- | --- |");
+                while (reader.Read())
+                {
+                    found = true;
+                    sb.AppendLine($"| `{reader.GetString(0)}` | {reader.GetInt64(1)} types |");
+                }
+                if (!found) sb.AppendLine("| *(none with 2+ consumers)* | |");
+            }
+            sb.AppendLine();
+            sb.AppendLine("*(ILogger and IOptions excluded — they're infrastructure concerns)*");
+            sb.AppendLine();
+
+            // Detected Conventions
             sb.AppendLine("## Detected Conventions");
             sb.AppendLine();
 
@@ -785,7 +913,7 @@ public class QueryService
                     JOIN assemblies a ON pr.assembly_id = a.id
                     WHERE pr.is_internal = 0 AND a.is_test = 0
                     GROUP BY package_name
-                    HAVING project_count >= 3
+                    HAVING project_count >= 2
                     ORDER BY project_count DESC
                     LIMIT 15";
                 using var reader = cmd.ExecuteReader();
@@ -811,9 +939,39 @@ public class QueryService
                 if (testPkgs.Count > 0)
                     sb.AppendLine($"- **Testing:** {string.Join(", ", testPkgs)}");
             }
+
+            // Naming conventions — detect common suffixes
+            sb.AppendLine("- **Naming Conventions:**");
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT suffix, COUNT(*) as cnt FROM (
+                        SELECT CASE
+                            WHEN type_name LIKE '%Controller' THEN 'Controller'
+                            WHEN type_name LIKE '%Service' THEN 'Service'
+                            WHEN type_name LIKE '%Repository' THEN 'Repository'
+                            WHEN type_name LIKE '%Handler' THEN 'Handler'
+                            WHEN type_name LIKE '%Factory' THEN 'Factory'
+                            WHEN type_name LIKE '%Manager' THEN 'Manager'
+                            WHEN type_name LIKE '%Provider' THEN 'Provider'
+                            WHEN type_name LIKE '%Validator' THEN 'Validator'
+                            WHEN type_name LIKE '%Extension%' THEN 'Extensions'
+                            WHEN type_name LIKE '%Options' THEN 'Options'
+                            WHEN type_name LIKE '%Dto' OR type_name LIKE '%DTO' THEN 'DTO'
+                            ELSE NULL
+                        END as suffix
+                        FROM types WHERE is_public = 1
+                    ) WHERE suffix IS NOT NULL
+                    GROUP BY suffix
+                    HAVING cnt >= 2
+                    ORDER BY cnt DESC";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    sb.AppendLine($"  - `*{reader.GetString(0)}` — {reader.GetInt64(1)} types");
+            }
             sb.AppendLine();
 
-            // Endpoints summary
+            // API Endpoints
             if (endpointCount > 0)
             {
                 sb.AppendLine("## API Endpoints");
@@ -858,6 +1016,80 @@ public class QueryService
                 }
             }
             sb.AppendLine();
+
+            // Development flows — how endpoints connect to services
+            if (endpointCount > 0)
+            {
+                sb.AppendLine("## Common Development Flows");
+                sb.AppendLine();
+                sb.AppendLine("When modifying this codebase, common change patterns include:");
+                sb.AppendLine();
+
+                // Detect endpoint -> DI chain
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT DISTINCT v.type_name, tid.dependency_type
+                    FROM endpoints e
+                    JOIN type_with_project v ON e.type_id = v.id
+                    JOIN type_injected_deps tid ON tid.type_id = v.id
+                    WHERE tid.dependency_type NOT LIKE 'ILogger%' AND tid.dependency_type NOT LIKE 'IOptions%'
+                    ORDER BY v.type_name
+                    LIMIT 20";
+                using var reader = cmd.ExecuteReader();
+                var controllerDeps = new Dictionary<string, List<string>>();
+                while (reader.Read())
+                {
+                    var controller = reader.GetString(0);
+                    var dep = reader.GetString(1);
+                    if (!controllerDeps.ContainsKey(controller))
+                        controllerDeps[controller] = new List<string>();
+                    controllerDeps[controller].Add(dep);
+                }
+
+                if (controllerDeps.Count > 0)
+                {
+                    sb.AppendLine("**Adding/modifying an API endpoint:**");
+                    foreach (var (controller, deps) in controllerDeps.Take(5))
+                    {
+                        sb.AppendLine($"- `{controller}` depends on: {string.Join(", ", deps.Select(d => $"`{d}`"))}");
+                    }
+                    sb.AppendLine();
+                }
+
+                sb.AppendLine("**General flow:** Controller → Service Interface → Service Implementation → Repository/Data Access");
+                sb.AppendLine();
+            }
+
+            // God class warnings
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+                    SELECT t.type_name, COUNT(*) as dep_count, p.name
+                    FROM type_injected_deps tid
+                    JOIN types t ON tid.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    GROUP BY t.id
+                    HAVING COUNT(*) >= 5
+                    ORDER BY dep_count DESC
+                    LIMIT 10";
+                using var reader = cmd.ExecuteReader();
+                var hasWarnings = false;
+                while (reader.Read())
+                {
+                    if (!hasWarnings)
+                    {
+                        sb.AppendLine("## ⚠️ Complexity Warnings");
+                        sb.AppendLine();
+                        sb.AppendLine("Types with high dependency counts that may benefit from refactoring:");
+                        sb.AppendLine();
+                        hasWarnings = true;
+                    }
+                    sb.AppendLine($"- `{reader.GetString(0)}` — {reader.GetInt64(1)} dependencies ({reader.GetString(2)})");
+                }
+                if (hasWarnings) sb.AppendLine();
+            }
 
             // Footer
             sb.AppendLine("---");
