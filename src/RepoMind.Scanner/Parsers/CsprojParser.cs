@@ -15,7 +15,11 @@ public static class CsprojParser
         {
             var relativePath = Path.GetRelativePath(projectDir, csproj);
             var isTest = IsTestProject(relativePath, csproj);
-            if (isTest) continue;
+            if (isTest)
+            {
+                Log.Debug("  Skipped test project: {Path}", relativePath);
+                continue;
+            }
 
             try
             {
@@ -87,18 +91,18 @@ public static class CsprojParser
             packageRefs, projectRefs);
     }
 
-    private static bool IsTestProject(string relativePath, string csprojPath)
+    internal static bool IsTestProject(string relativePath, string csprojPath)
     {
         var pathLower = relativePath.Replace('\\', '/').ToLowerInvariant();
-        if (pathLower.Contains("/test/") || pathLower.Contains("/tests/") || pathLower.Contains("benchmark"))
+        if (pathLower.Contains("/test/") || pathLower.Contains("/tests/") || pathLower.Contains("/benchmark/") || pathLower.Contains("/benchmarks/"))
             return true;
 
         try
         {
             var content = File.ReadAllText(csprojPath);
-            return content.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase)
-                || content.Contains("xunit", StringComparison.OrdinalIgnoreCase)
-                || content.Contains("nunit", StringComparison.OrdinalIgnoreCase);
+            return content.Contains("<PackageReference Include=\"Microsoft.NET.Test.Sdk\"", StringComparison.OrdinalIgnoreCase)
+                || content.Contains("<PackageReference Include=\"xunit\"", StringComparison.OrdinalIgnoreCase)
+                || content.Contains("<PackageReference Include=\"nunit\"", StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
     }
