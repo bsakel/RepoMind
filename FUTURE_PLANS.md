@@ -22,14 +22,18 @@ If one project has a malformed csproj or Roslyn can't parse a file, the scan wra
 ### 4. Semantic summaries ✅ Implemented
 Move beyond structural data (types, methods, parameters) to capture *intent*. Uses XML doc comments, method counts, interface relationships, DI dependency counts, and naming conventions to generate natural-language summaries via `get_project_summary` and `get_type_summary` MCP tools.
 
-### 5. Architecture pattern detection
-Automatically detect and label common patterns in the codebase:
-- Repository pattern (`IRepository<T>` implementations)
-- CQRS (MediatR handlers, command/query separation)
-- Event sourcing (`IEventStore`, domain events)
-- Mediator, decorator, factory patterns
+### 5. Architecture pattern detection ✅ Implemented
+Automatically detects and labels common patterns via the `detect_patterns` MCP tool:
+- Repository pattern (`I*Repository` implementors)
+- Decorator pattern (implements + injects same interface)
+- CQRS / Mediator (MediatR handlers, `*CommandHandler`, `*QueryHandler`)
+- Factory pattern (`*Factory` types)
+- Event Sourcing / Domain Events (`*DomainEvent`, `IEventStore`)
+- Options pattern (`IOptions<T>` injection)
+- Service Layer (`I*Service` implementations)
+- God class warnings (5+ constructor dependencies)
 
-The signals are already in the scanned data — interface names, DI registrations, naming conventions. Label them so AI agents get instant architectural context.
+Optionally scoped to a specific project.
 
 ### 6. Mermaid flow diagrams ✅ Implemented
 The `trace_flow`, `analyze_impact`, and `get_dependency_graph` tools now include Mermaid diagram blocks alongside their markdown output. Every AI agent and modern dev tool can render Mermaid for visual dependency chains.
@@ -87,7 +91,7 @@ Cache MCP tool query results with a short TTL (30s). The database is read-only b
 | 2 | Progress feedback | Small | ✅ Done |
 | 3 | Resilient scanning | Small | ✅ Done |
 | 4 | Semantic summaries | Medium | ✅ Done |
-| 5 | Pattern detection | Medium | Planned |
+| 5 | Pattern detection | Medium | ✅ Done |
 | 6 | Mermaid diagrams | Medium | ✅ Done |
 | 7 | Watch mode | Medium | Planned |
 | 8 | TypeScript support | Large | Planned |
@@ -96,4 +100,4 @@ Cache MCP tool query results with a short TTL (30s). The database is read-only b
 | 11 | Doctor command | Small | ✅ Done |
 | 12 | Impact stories | Medium | Planned |
 | 13 | Enhanced AGENTS.md | Medium | Planned |
-| 14 | Query caching | Small | Planned |
+| 14 | Query caching | Small | ✅ Done |

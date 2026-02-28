@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using RepoMind.Mcp.Configuration;
 using Microsoft.Data.Sqlite;
@@ -11,11 +12,38 @@ public class QueryService
     private readonly ILogger<QueryService> _logger;
     private readonly Func<SqliteConnection>? _connectionFactory;
 
+    // Query result cache with TTL
+    private readonly ConcurrentDictionary<string, (string Result, DateTime ExpiresAt)> _cache = new();
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
+
     public QueryService(RepoMindConfiguration config, ILogger<QueryService> logger, Func<SqliteConnection>? connectionFactory = null)
     {
         _config = config;
         _logger = logger;
         _connectionFactory = connectionFactory;
+    }
+
+    /// <summary>Clears the query cache. Call after rescan operations.</summary>
+    public void InvalidateCache()
+    {
+        _cache.Clear();
+        _logger.LogDebug("Query cache invalidated");
+    }
+
+    private string? GetCached(string key)
+    {
+        if (_cache.TryGetValue(key, out var entry) && entry.ExpiresAt > DateTime.UtcNow)
+        {
+            _logger.LogDebug("Cache hit for {CacheKey}", key);
+            return entry.Result;
+        }
+        return null;
+    }
+
+    private string SetCache(string key, string result)
+    {
+        _cache[key] = (result, DateTime.UtcNow + CacheTtl);
+        return result;
     }
 
     private const string NoDatabaseMessage =
@@ -74,6 +102,10 @@ public class QueryService
 
     public string ListProjects()
     {
+        var cacheKey = "ListProjects";
+        var cached = GetCached(cacheKey);
+        if (cached != null) return cached;
+
         var conn = GetConnection();
         try
         {
@@ -95,7 +127,7 @@ public class QueryService
             {
                 lines.Add($"| {reader.GetString(0)} | {reader.GetInt32(2)} | {reader.GetInt32(3)} |");
             }
-            return BuildMarkdownTable(lines, "No projects found.");
+            return SetCache(cacheKey, BuildMarkdownTable(lines, "No projects found."));
         }
         finally { MaybeClose(conn); }
     }
@@ -317,6 +349,10 @@ public class QueryService
 
     public string SearchTypes(string namePattern, string? namespaceName = null, string? kind = null, string? projectName = null)
     {
+        var cacheKey = $"SearchTypes:{namePattern}:{namespaceName}:{kind}:{projectName}";
+        var cached = GetCached(cacheKey);
+        if (cached != null) return cached;
+
         _logger.LogDebug("Executing SearchTypes with pattern: {Pattern}", namePattern);
         var conn = GetConnection();
         try
@@ -358,13 +394,17 @@ public class QueryService
                 var file = reader.IsDBNull(4) ? "" : reader.GetString(4);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(2)} | {reader.GetString(3)} | {file} |");
             }
-            return BuildMarkdownTable(lines, $"No types matching '{namePattern}'.");
+            return SetCache(cacheKey, BuildMarkdownTable(lines, $"No types matching '{namePattern}'."));
         }
         finally { MaybeClose(conn); }
     }
 
     public string FindImplementors(string interfaceName)
     {
+        var cacheKey = $"FindImplementors:{interfaceName}";
+        var cached = GetCached(cacheKey);
+        if (cached != null) return cached;
+
         _logger.LogDebug("Executing FindImplementors with interface: {InterfaceName}", interfaceName);
         var conn = GetConnection();
         try
@@ -388,7 +428,7 @@ public class QueryService
                 var file = reader.IsDBNull(4) ? "" : reader.GetString(4);
                 lines.Add($"| {reader.GetString(0)} | {reader.GetString(1)} | {reader.GetString(5)} | {reader.GetString(3)} | {file} |");
             }
-            return BuildMarkdownTable(lines, $"No implementors of '{interfaceName}' found.");
+            return SetCache(cacheKey, BuildMarkdownTable(lines, $"No implementors of '{interfaceName}' found."));
         }
         finally { MaybeClose(conn); }
     }
@@ -1629,6 +1669,295 @@ public class QueryService
 
             sb.AppendLine();
             sb.AppendLine($"*Location: `{filePath}` in assembly `{assembly}`*");
+
+            return sb.ToString();
+        }
+        finally { MaybeClose(conn); }
+    }
+
+    public string DetectPatterns(string? projectName = null)
+    {
+        _logger.LogDebug("Detecting architecture patterns{Project}", projectName != null ? $" for {projectName}" : "");
+        var conn = GetConnection();
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("# Architecture Patterns Detected");
+            sb.AppendLine();
+
+            var projectFilter = "";
+            string? resolvedName = null;
+            if (projectName != null)
+            {
+                resolvedName = ResolveProjectName(conn, projectName);
+                if (resolvedName == null)
+                    return $"Project '{projectName}' not found.";
+                projectFilter = " AND a.project_id = (SELECT id FROM projects WHERE name = @projectName)";
+                sb.AppendLine($"*Scoped to project: {resolvedName}*");
+                sb.AppendLine();
+            }
+
+            var patternsFound = 0;
+
+            // 1. Repository Pattern: IRepository or I*Repository interfaces with implementors
+            var repoTypes = new List<(string iface, string impl, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT ti.interface_name, t.type_name, p.name
+                    FROM type_interfaces ti
+                    JOIN types t ON ti.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE (ti.interface_name LIKE 'IRepository%' OR ti.interface_name LIKE 'I%Repository')
+                    {projectFilter}
+                    ORDER BY ti.interface_name, t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    repoTypes.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            if (repoTypes.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 📦 Repository Pattern");
+                sb.AppendLine();
+                sb.AppendLine("Data access abstracted behind repository interfaces:");
+                sb.AppendLine();
+                foreach (var (iface, impl, proj) in repoTypes)
+                    sb.AppendLine($"- `{impl}` implements `{iface}` ({proj})");
+                sb.AppendLine();
+            }
+
+            // 2. Decorator Pattern: class implements interface AND injects the same interface
+            var decorators = new List<(string typeName, string iface, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT t.type_name, ti.interface_name, p.name
+                    FROM types t
+                    JOIN type_interfaces ti ON ti.type_id = t.id
+                    JOIN type_injected_deps tid ON tid.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE tid.dependency_type = ti.interface_name
+                    {projectFilter}
+                    ORDER BY t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    decorators.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            if (decorators.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 🎀 Decorator Pattern");
+                sb.AppendLine();
+                sb.AppendLine("Types that implement an interface while also injecting it (wrapping behavior):");
+                sb.AppendLine();
+                foreach (var (typeName, iface, proj) in decorators)
+                    sb.AppendLine($"- `{typeName}` decorates `{iface}` ({proj})");
+                sb.AppendLine();
+            }
+
+            // 3. CQRS / Mediator: MediatR handlers or types named *Handler, *Command, *Query with IRequest
+            var cqrsTypes = new List<(string typeName, string kind, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT t.type_name, t.kind, p.name
+                    FROM types t
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE t.is_public = 1
+                    AND (
+                        t.type_name LIKE '%CommandHandler' OR t.type_name LIKE '%QueryHandler'
+                        OR EXISTS (SELECT 1 FROM type_interfaces ti WHERE ti.type_id = t.id
+                                   AND (ti.interface_name LIKE 'IRequestHandler%' OR ti.interface_name LIKE 'INotificationHandler%'))
+                    )
+                    {projectFilter}
+                    ORDER BY t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    cqrsTypes.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            if (cqrsTypes.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 📬 CQRS / Mediator Pattern");
+                sb.AppendLine();
+                sb.AppendLine("Command/query separation with handler types:");
+                sb.AppendLine();
+                foreach (var (typeName, kind, proj) in cqrsTypes)
+                    sb.AppendLine($"- `{typeName}` ({kind}, {proj})");
+                sb.AppendLine();
+            }
+
+            // 4. Factory Pattern: types named *Factory with creation methods
+            var factories = new List<(string typeName, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT t.type_name, p.name
+                    FROM types t
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE t.is_public = 1
+                    AND (t.type_name LIKE '%Factory' OR t.type_name LIKE 'I%Factory')
+                    {projectFilter}
+                    ORDER BY t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    factories.Add((reader.GetString(0), reader.GetString(1)));
+            }
+            if (factories.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 🏭 Factory Pattern");
+                sb.AppendLine();
+                sb.AppendLine("Object creation abstracted via factory types:");
+                sb.AppendLine();
+                foreach (var (typeName, proj) in factories)
+                    sb.AppendLine($"- `{typeName}` ({proj})");
+                sb.AppendLine();
+            }
+
+            // 5. Event Sourcing / Domain Events: types named *Event, *DomainEvent, IEventStore
+            var eventTypes = new List<(string typeName, string kind, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT t.type_name, t.kind, p.name
+                    FROM types t
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE t.is_public = 1
+                    AND (
+                        t.type_name LIKE '%DomainEvent' OR t.type_name LIKE 'I%EventStore'
+                        OR t.type_name LIKE '%EventHandler'
+                        OR EXISTS (SELECT 1 FROM type_interfaces ti WHERE ti.type_id = t.id
+                                   AND (ti.interface_name LIKE 'IEventStore%' OR ti.interface_name LIKE 'IDomainEvent%'))
+                    )
+                    {projectFilter}
+                    ORDER BY t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    eventTypes.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            if (eventTypes.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 📡 Event Sourcing / Domain Events");
+                sb.AppendLine();
+                foreach (var (typeName, kind, proj) in eventTypes)
+                    sb.AppendLine($"- `{typeName}` ({kind}, {proj})");
+                sb.AppendLine();
+            }
+
+            // 6. Options Pattern: IOptions<T> injection
+            var optionsTypes = new List<(string consumer, string optionsType, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT DISTINCT t.type_name, tid.dependency_type, p.name
+                    FROM type_injected_deps tid
+                    JOIN types t ON tid.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE tid.dependency_type LIKE 'IOptions<%>'
+                    {projectFilter}
+                    ORDER BY t.type_name";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    optionsTypes.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            if (optionsTypes.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## ⚙️ Options Pattern");
+                sb.AppendLine();
+                sb.AppendLine("Strongly-typed configuration via `IOptions<T>`:");
+                sb.AppendLine();
+                foreach (var (consumer, optType, proj) in optionsTypes)
+                    sb.AppendLine($"- `{consumer}` uses `{optType}` ({proj})");
+                sb.AppendLine();
+            }
+
+            // 7. Service Layer: types implementing I*Service interfaces
+            var serviceCount = 0L;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT COUNT(DISTINCT ti.type_id)
+                    FROM type_interfaces ti
+                    JOIN types t ON ti.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    WHERE ti.interface_name LIKE 'I%Service'
+                    AND t.kind = 'class'
+                    {projectFilter}";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                serviceCount = (long)(cmd.ExecuteScalar() ?? 0);
+            }
+            if (serviceCount > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## 🔧 Service Layer Pattern");
+                sb.AppendLine();
+                sb.AppendLine($"Found **{serviceCount}** service implementations (classes implementing `I*Service` interfaces).");
+                sb.AppendLine();
+            }
+
+            // 8. Heavy DI Consumers (God classes risk)
+            var heavyDi = new List<(string typeName, long depCount, string project)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $@"
+                    SELECT t.type_name, COUNT(*) as dep_count, p.name
+                    FROM type_injected_deps tid
+                    JOIN types t ON tid.type_id = t.id
+                    JOIN namespaces n ON t.namespace_id = n.id
+                    JOIN assemblies a ON n.assembly_id = a.id
+                    JOIN projects p ON a.project_id = p.id
+                    WHERE 1=1 {projectFilter}
+                    GROUP BY t.id
+                    HAVING COUNT(*) >= 5
+                    ORDER BY dep_count DESC";
+                if (resolvedName != null) cmd.Parameters.AddWithValue("@projectName", resolvedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    heavyDi.Add((reader.GetString(0), reader.GetInt64(1), reader.GetString(2)));
+            }
+            if (heavyDi.Count > 0)
+            {
+                patternsFound++;
+                sb.AppendLine("## ⚠️ High Dependency Count (potential God classes)");
+                sb.AppendLine();
+                sb.AppendLine("Types with 5+ constructor-injected dependencies — consider splitting:");
+                sb.AppendLine();
+                foreach (var (typeName, depCount, proj) in heavyDi)
+                    sb.AppendLine($"- `{typeName}` — **{depCount} dependencies** ({proj})");
+                sb.AppendLine();
+            }
+
+            // Summary
+            if (patternsFound == 0)
+                sb.AppendLine("No common architecture patterns detected in the scanned codebase.");
+            else
+            {
+                sb.AppendLine("---");
+                sb.AppendLine($"*{patternsFound} pattern(s) detected.*");
+            }
 
             return sb.ToString();
         }

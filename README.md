@@ -4,7 +4,7 @@ An AI memory layer for multi-repo codebases. RepoMind gives GitHub Copilot cross
 
 ## What's Included
 
-- **RepoMind.Mcp** — An MCP server (STDIO transport) that exposes 21 tools for querying types, dependencies, endpoints, configuration, impact analysis, version alignment, test coverage, git status, and more across all projects in a codebase
+- **RepoMind.Mcp** — An MCP server (STDIO transport) that exposes 22 tools for querying types, dependencies, endpoints, configuration, impact analysis, version alignment, test coverage, git status, and more across all projects in a codebase
 - **RepoMind.Scanner** — A Roslyn-based scanner that catalogs all projects, types, methods, REST/GraphQL endpoints, configuration keys, interfaces, and constructor-injected dependencies into a SQLite database and/or flat files
 
 ## Prerequisites
@@ -28,7 +28,7 @@ RepoMind supports two workflows depending on how your AI agent (or you) prefers 
 
 ### Workflow A: MCP Server
 
-**For AI agents that use structured tool calls** (e.g., GitHub Copilot with MCP support). The MCP server exposes 21 specialized query tools backed by a SQLite database. Agents invoke tools like `search_types`, `trace_flow`, or `analyze_impact` to get precise, filtered answers.
+**For AI agents that use structured tool calls** (e.g., GitHub Copilot with MCP support). The MCP server exposes 22 specialized query tools backed by a SQLite database. Agents invoke tools like `search_types`, `trace_flow`, or `analyze_impact` to get precise, filtered answers.
 
 #### Setup
 
@@ -191,6 +191,7 @@ RepoMind automatically determines which NuGet packages are "internal" (i.e., ref
 | `find_untested_types` | Find production types without test classes |
 | `get_project_summary` | Natural-language project summary with role analysis |
 | `get_type_summary` | Natural-language type summary with complexity assessment |
+| `detect_patterns` | Auto-detect architecture patterns (Repository, CQRS, Factory, etc.) |
 
 ## Project Structure
 
@@ -204,7 +205,7 @@ src/
   RepoMind.Scanner.Cli/              # Scanner CLI entry point
 
 tests/
-  RepoMind.Mcp.Tests/               # xUnit tests (92 tests)
+  RepoMind.Mcp.Tests/               # xUnit tests (99 tests)
   RepoMind.Scanner.Tests/           # xUnit tests (18 tests)
 
 memory/                              # Generated scanner output

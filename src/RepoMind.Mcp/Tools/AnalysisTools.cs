@@ -53,4 +53,23 @@ public class AnalysisTools
             return ex.Message;
         }
     }
+
+    [McpServerTool(Name = "detect_patterns"), Description(
+        "Auto-detect architecture patterns in the codebase: Repository, Decorator, CQRS/Mediator, Factory, " +
+        "Event Sourcing, Options, Service Layer, and God class warnings. " +
+        "Optionally scoped to a specific project.")]
+    public string DetectPatterns(
+        [Description("Optional project name to scope detection to")] string? projectName = null)
+    {
+        _logger.LogInformation("Tool {ToolName} invoked", "detect_patterns");
+        _logger.LogDebug("Parameters: projectName={ProjectName}", projectName);
+        try
+        {
+            return _query.DetectPatterns(projectName);
+        }
+        catch (DatabaseNotFoundException ex)
+        {
+            return ex.Message;
+        }
+    }
 }

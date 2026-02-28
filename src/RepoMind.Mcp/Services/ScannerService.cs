@@ -9,12 +9,14 @@ public class ScannerService
 {
     private readonly RepoMindConfiguration _config;
     private readonly ILogger<ScannerService> _logger;
+    private readonly QueryService _queryService;
     private readonly SemaphoreSlim _scanLock = new(1, 1);
 
-    public ScannerService(RepoMindConfiguration config, ILogger<ScannerService> logger)
+    public ScannerService(RepoMindConfiguration config, ILogger<ScannerService> logger, QueryService queryService)
     {
         _config = config;
         _logger = logger;
+        _queryService = queryService;
     }
 
     public async Task<ScanResult> RescanMemory(bool incremental = false, CancellationToken ct = default)
@@ -51,6 +53,7 @@ public class ScannerService
             }, ct);
 
             _logger.LogInformation("Rescan completed in {Duration}", result.Duration);
+            _queryService.InvalidateCache();
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -113,6 +116,7 @@ public class ScannerService
             }, ct);
 
             _logger.LogInformation("Per-project rescan for {Project} completed in {Duration}", projectName, result.Duration);
+            _queryService.InvalidateCache();
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

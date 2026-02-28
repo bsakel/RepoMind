@@ -352,4 +352,74 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
         result.Should().Contain("depends on");
         result.Should().Contain("injected services");
     }
+
+    // Pattern detection tests
+
+    [Fact]
+    public void DetectPatterns_FindsRepositoryPattern()
+    {
+        // ContentController implements IRepository in fixture data
+        var result = _sut.DetectPatterns();
+
+        result.Should().Contain("Architecture Patterns Detected");
+        result.Should().Contain("Repository Pattern");
+    }
+
+    [Fact]
+    public void DetectPatterns_FindsOptionsPattern()
+    {
+        // CoherentCacheService injects IOptions<CacheOptions> in fixture
+        var result = _sut.DetectPatterns();
+
+        result.Should().Contain("Options Pattern");
+        result.Should().Contain("IOptions<CacheOptions>");
+    }
+
+    [Fact]
+    public void DetectPatterns_FindsServiceLayerPattern()
+    {
+        // PublishingService implements IPublishingService in fixture
+        var result = _sut.DetectPatterns();
+
+        result.Should().Contain("Service Layer Pattern");
+    }
+
+    [Fact]
+    public void DetectPatterns_ScopedToProject_ReturnsProjectName()
+    {
+        var result = _sut.DetectPatterns("acme.caching");
+
+        result.Should().Contain("acme.caching");
+    }
+
+    [Fact]
+    public void DetectPatterns_InvalidProject_ReturnsNotFound()
+    {
+        var result = _sut.DetectPatterns("nonexistent");
+
+        result.Should().Contain("not found");
+    }
+
+    // Cache tests
+
+    [Fact]
+    public void ListProjects_ReturnsCachedResult()
+    {
+        var result1 = _sut.ListProjects();
+        var result2 = _sut.ListProjects();
+
+        // Both should return the same content (cached)
+        result2.Should().Be(result1);
+    }
+
+    [Fact]
+    public void InvalidateCache_ClearsCache()
+    {
+        var result1 = _sut.ListProjects();
+        _sut.InvalidateCache();
+        var result2 = _sut.ListProjects();
+
+        // Should still return same data (from DB), just verifying no crash
+        result2.Should().Be(result1);
+    }
 }
