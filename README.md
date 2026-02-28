@@ -90,10 +90,25 @@ dotnet tool install --global RepoMind --add-source ./nupkg
 The first time, ask Copilot to scan your codebase:
 > "Use the `rescan_memory` tool to scan the codebase"
 
+Or use the CLI directly:
+```bash
+dotnet run --project src/RepoMind.Mcp -- --init --root=/path/to/your/codebase
+```
+
 For subsequent updates (only rescan changed projects):
 > "Use the `rescan_memory` tool with incremental=true"
 
 The MCP server will guide you if the database hasn't been created yet.
+
+#### Diagnostics
+
+If something isn't working, run the built-in health check:
+```bash
+dotnet run --project src/RepoMind.Mcp -- --doctor --root=/path/to/your/codebase
+
+# Investigate why a specific type is missing:
+dotnet run --project src/RepoMind.Mcp -- --doctor --type=MyService --root=/path/to/your/codebase
+```
 
 ---
 
@@ -156,7 +171,7 @@ RepoMind automatically determines which NuGet packages are "internal" (i.e., ref
 |------|-------------|
 | `list_projects` | List all scanned projects |
 | `get_project_info` | Detailed info for a specific project |
-| `get_dependency_graph` | NuGet dependency relationships |
+| `get_dependency_graph` | NuGet dependency relationships (with Mermaid diagram) |
 | `search_types` | Find types by name pattern |
 | `find_implementors` | Find types implementing an interface |
 | `find_type_details` | Full type info (interfaces, DI deps) |
@@ -164,15 +179,18 @@ RepoMind automatically determines which NuGet packages are "internal" (i.e., ref
 | `search_endpoints` | Find REST/GraphQL endpoints by route |
 | `search_methods` | Find public methods by name pattern |
 | `search_config` | Find config keys (appsettings, env vars, IConfiguration) |
-| `trace_flow` | Trace type usage chains across projects |
-| `analyze_impact` | Blast radius analysis for type changes |
+| `trace_flow` | Trace type usage chains across projects (with Mermaid diagram) |
+| `analyze_impact` | Blast radius analysis for type changes (with Mermaid diagram) |
 | `get_package_versions` | NuGet package version usage |
 | `update_repos` | Git pull all repos (with optional auto-rescan) |
 | `get_repo_status` | Git status across all repos |
 | `rescan_memory` | Re-run the Roslyn scanner (supports incremental) |
+| `rescan_project` | Rescan a single project by name |
 | `generate_agents_md` | Auto-generate AGENTS.md for the codebase |
 | `check_version_alignment` | Detect NuGet version mismatches (MAJOR/MINOR) |
 | `find_untested_types` | Find production types without test classes |
+| `get_project_summary` | Natural-language project summary with role analysis |
+| `get_type_summary` | Natural-language type summary with complexity assessment |
 
 ## Project Structure
 
@@ -186,7 +204,8 @@ src/
   RepoMind.Scanner.Cli/              # Scanner CLI entry point
 
 tests/
-  RepoMind.Mcp.Tests/               # 74 xUnit tests
+  RepoMind.Mcp.Tests/               # xUnit tests (92 tests)
+  RepoMind.Scanner.Tests/           # xUnit tests (18 tests)
 
 memory/                              # Generated scanner output
 ```
