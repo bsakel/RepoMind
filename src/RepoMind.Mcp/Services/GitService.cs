@@ -73,8 +73,9 @@ public class GitService
                 _logger.LogDebug("Getting status for repo {RepoName}", Path.GetFileName(repo));
                 return await GetRepoStatus(repo, ct);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "Error getting status for repo {RepoName}", Path.GetFileName(repo));
                 return new RepoStatus(Path.GetFileName(repo), "error", false, 0, 0);
             }
             finally
@@ -131,8 +132,9 @@ public class GitService
                 _logger.LogDebug("Pulling repo {RepoName}", Path.GetFileName(repo));
                 return await FetchAndPull(repo, ct);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "Error pulling repo {RepoName}", Path.GetFileName(repo));
                 return new PullResult(Path.GetFileName(repo), "unknown", PullStatus.Error, "Unexpected error during pull.");
             }
             finally

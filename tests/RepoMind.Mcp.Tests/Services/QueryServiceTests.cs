@@ -205,4 +205,49 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
         act.Should().Throw<DatabaseNotFoundException>()
             .WithMessage("*rescan_memory*");
     }
+
+    [Fact]
+    public void SearchEndpoints_ByRoute_ReturnsMatches()
+    {
+        var result = _sut.SearchEndpoints("content");
+
+        result.Should().Contain("api/content");
+        result.Should().Contain("GET");
+    }
+
+    [Fact]
+    public void SearchEndpoints_NoMatch_ReturnsNotFound()
+    {
+        var result = _sut.SearchEndpoints("nonexistent_route_xyz");
+
+        result.Should().Contain("No endpoints matching");
+    }
+
+    [Fact]
+    public void SearchMethods_ByName_ReturnsMatches()
+    {
+        var result = _sut.SearchMethods("Publish*");
+
+        result.Should().Contain("PublishAsync");
+        result.Should().Contain("PublishingService");
+    }
+
+    [Fact]
+    public void SearchMethods_FilterByProject_NarrowsResults()
+    {
+        var result = _sut.SearchMethods("*Async*", projectName: "acme.caching");
+
+        result.Should().Contain("GetAsync");
+        result.Should().NotContain("PublishAsync");
+    }
+
+    [Fact]
+    public void GetMemoryInfo_ReturnsRowCounts()
+    {
+        var result = _sut.GetMemoryInfo();
+
+        result.Should().Contain("Row Counts");
+        result.Should().Contain("projects");
+        result.Should().Contain("types");
+    }
 }

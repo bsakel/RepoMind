@@ -21,7 +21,7 @@ public class QueryService
     private const string NoDatabaseMessage =
         "⚠️ Memory database not found. Run the `rescan_memory` tool first to scan your codebase.";
 
-    private const string CreateTypeWithProjectView = @"
+    internal const string CreateTypeWithProjectView = @"
         CREATE TEMP VIEW IF NOT EXISTS type_with_project AS
         SELECT t.*, n.namespace_name, a.assembly_name, a.target_framework,
                a.is_test, p.name AS project_name, p.git_remote_url
@@ -53,9 +53,16 @@ public class QueryService
 
     private void EnsureViews(SqliteConnection conn)
     {
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = CreateTypeWithProjectView;
-        cmd.ExecuteNonQuery();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = CreateTypeWithProjectView;
+            cmd.ExecuteNonQuery();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 8)
+        {
+            // SQLITE_READONLY — view already created (e.g., test fixture)
+        }
     }
 
     private bool OwnsConnection => _connectionFactory == null;
@@ -1182,7 +1189,7 @@ public class QueryService
             try
             {
                 using var metaCmd = conn.CreateCommand();
-                metaCmd.CommandText = "SELECT value FROM scan_metadata WHERE key = 'last_scan_timestamp'";
+                metaCmd.CommandText = "SELECT MAX(last_scan_utc) FROM scan_metadata";
                 var timestamp = metaCmd.ExecuteScalar() as string;
                 if (timestamp != null)
                     sb.AppendLine($"**Last scan:** {timestamp}\n");

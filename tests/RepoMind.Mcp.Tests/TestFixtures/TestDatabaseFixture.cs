@@ -154,6 +154,9 @@ public class TestDatabaseFixture : IDisposable
             ('acme.core', 'env_var', 'LOG_LEVEL', NULL, 'src/Common/Logging.cs')
         ");
 
+        // Create temp views that QueryService.EnsureViews() requires
+        ExecuteNonQuery(RepoMind.Mcp.Services.QueryService.CreateTypeWithProjectView);
+
         // Prevent accidental writes from tests
         using var pragmaCmd = Connection.CreateCommand();
         pragmaCmd.CommandText = "PRAGMA query_only = ON;";

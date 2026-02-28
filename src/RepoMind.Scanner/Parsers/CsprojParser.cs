@@ -94,8 +94,12 @@ public static class CsprojParser
     internal static bool IsTestProject(string relativePath, string csprojPath)
     {
         var pathLower = relativePath.Replace('\\', '/').ToLowerInvariant();
-        if (pathLower.Contains("/test/") || pathLower.Contains("/tests/") || pathLower.Contains("/benchmark/") || pathLower.Contains("/benchmarks/"))
-            return true;
+        var segments = new[] { "test", "tests", "benchmark", "benchmarks" };
+        foreach (var seg in segments)
+        {
+            if (pathLower.Contains($"/{seg}/") || pathLower.StartsWith($"{seg}/"))
+                return true;
+        }
 
         try
         {

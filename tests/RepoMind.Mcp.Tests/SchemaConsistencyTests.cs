@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using RepoMind.Scanner.Writers;
+using Xunit;
 
 namespace RepoMind.Mcp.Tests;
 
