@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using RepoMind.Scanner.Writers;
 
 namespace RepoMind.Mcp.Tests.TestFixtures;
 
@@ -10,127 +11,8 @@ public class TestDatabaseFixture : IDisposable
     {
         Connection = new SqliteConnection("Data Source=:memory:");
         Connection.Open();
-        CreateSchema();
+        SqliteWriter.CreateSchemaOn(Connection);
         SeedData();
-    }
-
-    private void CreateSchema()
-    {
-        ExecuteNonQuery(@"
-            CREATE TABLE projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                directory_path TEXT NOT NULL,
-                solution_file TEXT,
-                git_remote_url TEXT,
-                default_branch TEXT
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE assemblies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL REFERENCES projects(id),
-                csproj_path TEXT NOT NULL,
-                assembly_name TEXT NOT NULL,
-                target_framework TEXT,
-                output_type TEXT,
-                is_test INTEGER NOT NULL DEFAULT 0
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE package_references (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assembly_id INTEGER NOT NULL REFERENCES assemblies(id),
-                package_name TEXT NOT NULL,
-                version TEXT,
-                is_internal INTEGER NOT NULL DEFAULT 0
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE project_references (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assembly_id INTEGER NOT NULL REFERENCES assemblies(id),
-                referenced_csproj_path TEXT NOT NULL
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE namespaces (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assembly_id INTEGER NOT NULL REFERENCES assemblies(id),
-                namespace_name TEXT NOT NULL
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE types (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-                type_name TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                is_public INTEGER NOT NULL DEFAULT 0,
-                file_path TEXT,
-                base_type TEXT,
-                summary_comment TEXT
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE type_interfaces (
-                type_id INTEGER NOT NULL REFERENCES types(id),
-                interface_name TEXT NOT NULL,
-                PRIMARY KEY (type_id, interface_name)
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE type_injected_deps (
-                type_id INTEGER NOT NULL REFERENCES types(id),
-                dependency_type TEXT NOT NULL,
-                PRIMARY KEY (type_id, dependency_type)
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE methods (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type_id INTEGER NOT NULL REFERENCES types(id),
-                method_name TEXT NOT NULL,
-                return_type TEXT NOT NULL,
-                is_public INTEGER NOT NULL DEFAULT 1,
-                is_static INTEGER NOT NULL DEFAULT 0
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE method_parameters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                method_id INTEGER NOT NULL REFERENCES methods(id),
-                param_name TEXT NOT NULL,
-                param_type TEXT NOT NULL,
-                position INTEGER NOT NULL
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE endpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type_id INTEGER NOT NULL REFERENCES types(id),
-                method_id INTEGER NOT NULL REFERENCES methods(id),
-                http_method TEXT NOT NULL,
-                route_template TEXT,
-                endpoint_kind TEXT NOT NULL
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE scan_metadata (
-                project_name TEXT PRIMARY KEY,
-                file_hash TEXT NOT NULL,
-                last_scan_utc TEXT NOT NULL
-            )");
-
-        ExecuteNonQuery(@"
-            CREATE TABLE config_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_name TEXT NOT NULL,
-                source TEXT NOT NULL,
-                key_name TEXT NOT NULL,
-                default_value TEXT,
-                file_path TEXT NOT NULL
-            )");
     }
 
     private void SeedData()
@@ -271,6 +153,11 @@ public class TestDatabaseFixture : IDisposable
             ('acme.web.api', 'IConfiguration', 'Kafka:BootstrapServers', NULL, 'src/CmApi/Startup.cs'),
             ('acme.core', 'env_var', 'LOG_LEVEL', NULL, 'src/Common/Logging.cs')
         ");
+
+        // Prevent accidental writes from tests
+        using var pragmaCmd = Connection.CreateCommand();
+        pragmaCmd.CommandText = "PRAGMA query_only = ON;";
+        pragmaCmd.ExecuteNonQuery();
     }
 
     private void ExecuteNonQuery(string sql)

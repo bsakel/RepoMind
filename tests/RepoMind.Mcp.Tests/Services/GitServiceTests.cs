@@ -21,7 +21,7 @@ public class GitServiceTests
             RootPath = _testRoot,
             DbPath = Path.Combine(_testRoot, "memory", "repomind.db"),
         };
-        _sut = new GitService(config, _processRunner);
+        _sut = new GitService(config, _processRunner, Microsoft.Extensions.Logging.Abstractions.NullLogger<GitService>.Instance);
     }
 
     [Fact]

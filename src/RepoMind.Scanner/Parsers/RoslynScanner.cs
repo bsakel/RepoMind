@@ -17,8 +17,8 @@ public static class RoslynScanner
 
         var srcDirs = FindSrcDirectories(projectDir);
         var csFiles = srcDirs.SelectMany(d => Directory.GetFiles(d, "*.cs", SearchOption.AllDirectories))
-            .Where(f => !f.Contains("obj" + Path.DirectorySeparatorChar)
-                     && !f.Contains("bin" + Path.DirectorySeparatorChar))
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar)
+                     && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar))
             .ToList();
 
         Log.Information("  Scanning {Count} source files...", csFiles.Count);
@@ -71,7 +71,8 @@ public static class RoslynScanner
 
         foreach (var ns in blockNamespaces)
         {
-            results.AddRange(ExtractTypes(ns.Members, ns.Name.ToString(), relativePath));
+            var nsName = BuildFullNamespaceName(ns);
+            results.AddRange(ExtractTypes(ns.Members, nsName, relativePath));
         }
 
         var topLevelTypes = root.ChildNodes()
@@ -83,6 +84,18 @@ public static class RoslynScanner
         }
 
         return results;
+    }
+
+    private static string BuildFullNamespaceName(NamespaceDeclarationSyntax ns)
+    {
+        var parts = new List<string> { ns.Name.ToString() };
+        var current = ns.Parent;
+        while (current is NamespaceDeclarationSyntax parentNs)
+        {
+            parts.Insert(0, parentNs.Name.ToString());
+            current = parentNs.Parent;
+        }
+        return string.Join(".", parts);
     }
 
     private static List<TypeInfo> ExtractTypes(
@@ -102,6 +115,7 @@ public static class RoslynScanner
         string? typeName = null;
         string kind = "unknown";
         bool isPublic = false;
+        bool isPartial = false;
         string? baseType = null;
         var interfaces = new List<string>();
         var injectedDeps = new List<string>();
@@ -113,6 +127,7 @@ public static class RoslynScanner
                 typeName = cls.Identifier.Text;
                 kind = "class";
                 isPublic = cls.Modifiers.Any(SyntaxKind.PublicKeyword);
+                isPartial = cls.Modifiers.Any(SyntaxKind.PartialKeyword);
                 ExtractBaseTypes(cls.BaseList, out baseType, out interfaces);
                 injectedDeps = ExtractConstructorInjections(cls);
                 summary = ExtractXmlSummary(cls);
@@ -122,6 +137,7 @@ public static class RoslynScanner
                 typeName = iface.Identifier.Text;
                 kind = "interface";
                 isPublic = iface.Modifiers.Any(SyntaxKind.PublicKeyword);
+                isPartial = iface.Modifiers.Any(SyntaxKind.PartialKeyword);
                 ExtractBaseTypes(iface.BaseList, out baseType, out interfaces);
                 summary = ExtractXmlSummary(iface);
                 break;
@@ -130,6 +146,7 @@ public static class RoslynScanner
                 typeName = rec.Identifier.Text;
                 kind = rec.ClassOrStructKeyword.IsKind(SyntaxKind.StructKeyword) ? "record struct" : "record";
                 isPublic = rec.Modifiers.Any(SyntaxKind.PublicKeyword);
+                isPartial = rec.Modifiers.Any(SyntaxKind.PartialKeyword);
                 ExtractBaseTypes(rec.BaseList, out baseType, out interfaces);
                 injectedDeps = ExtractConstructorInjections(rec);
                 summary = ExtractXmlSummary(rec);
@@ -139,6 +156,7 @@ public static class RoslynScanner
                 typeName = str.Identifier.Text;
                 kind = "struct";
                 isPublic = str.Modifiers.Any(SyntaxKind.PublicKeyword);
+                isPartial = str.Modifiers.Any(SyntaxKind.PartialKeyword);
                 ExtractBaseTypes(str.BaseList, out baseType, out interfaces);
                 summary = ExtractXmlSummary(str);
                 break;
@@ -162,7 +180,7 @@ public static class RoslynScanner
 
         return new TypeInfo(
             namespaceName, typeName, kind, isPublic,
-            filePath, baseType, interfaces, injectedDeps, summary, methods);
+            filePath, baseType, interfaces, injectedDeps, summary, methods, isPartial);
     }
 
     private static void ExtractBaseTypes(
@@ -172,13 +190,24 @@ public static class RoslynScanner
         interfaces = new List<string>();
         if (baseList == null) return;
 
-        foreach (var bt in baseList.Types)
+        var types = baseList.Types;
+        for (int i = 0; i < types.Count; i++)
         {
-            var name = bt.Type.ToString();
-            if (name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1]))
-                interfaces.Add(name);
+            var name = types[i].Type.ToString();
+            if (i == 0)
+            {
+                // First item: could be base class or interface.
+                // Only treat as interface if it matches I+uppercase heuristic.
+                if (name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1]))
+                    interfaces.Add(name);
+                else
+                    baseType = name;
+            }
             else
-                baseType ??= name;
+            {
+                // Subsequent items are always interfaces in C#.
+                interfaces.Add(name);
+            }
         }
     }
 
@@ -240,9 +269,10 @@ public static class RoslynScanner
         var end = xml.IndexOf("</summary>");
         if (start >= 0 && end > start)
         {
-            var content = xml[(start + 9)..end]
-                .Replace("///", "")
-                .Replace("//", "")
+            var rawContent = xml[(start + 9)..end];
+            var content = string.Join("\n", rawContent
+                .Split('\n')
+                .Select(line => line.TrimStart().TrimStart('/').TrimStart()))
                 .Trim();
             return string.IsNullOrWhiteSpace(content) ? null : content;
         }
@@ -288,9 +318,41 @@ public static class RoslynScanner
         "QueryType", "MutationType", "SubscriptionType"
     };
 
+    private static string ExtractRouteTemplate(AttributeSyntax attr)
+    {
+        var firstArg = attr.ArgumentList?.Arguments.FirstOrDefault();
+        if (firstArg == null) return "";
+
+        if (firstArg.Expression is LiteralExpressionSyntax literal)
+            return literal.Token.ValueText;
+
+        return firstArg.ToString().Trim('"');
+    }
+
+    private static string GetClassRoutePrefix(MethodDeclarationSyntax method)
+    {
+        if (method.Parent is not TypeDeclarationSyntax typeDecl)
+            return "";
+
+        foreach (var attrList in typeDecl.AttributeLists)
+        {
+            foreach (var attr in attrList.Attributes)
+            {
+                var name = attr.Name.ToString();
+                if (name.EndsWith("Attribute"))
+                    name = name.Substring(0, name.Length - "Attribute".Length);
+
+                if (name is "Route")
+                    return ExtractRouteTemplate(attr);
+            }
+        }
+        return "";
+    }
+
     private static List<EndpointInfo> ExtractEndpoints(MethodDeclarationSyntax method)
     {
         var endpoints = new List<EndpointInfo>();
+        var classRoutePrefix = GetClassRoutePrefix(method);
 
         foreach (var attrList in method.AttributeLists)
         {
@@ -303,7 +365,8 @@ public static class RoslynScanner
                 // REST endpoints
                 if (HttpAttributeMap.TryGetValue(attrName, out var httpMethod))
                 {
-                    var route = attr.ArgumentList?.Arguments.FirstOrDefault()?.ToString().Trim('"') ?? "";
+                    var methodRoute = ExtractRouteTemplate(attr);
+                    var route = CombineRouteParts(classRoutePrefix, methodRoute);
                     endpoints.Add(new EndpointInfo(httpMethod, route, "REST"));
                 }
 
@@ -313,13 +376,20 @@ public static class RoslynScanner
                     var kind = attrName.Contains("Mutation", StringComparison.OrdinalIgnoreCase) ? "MUTATION"
                         : attrName.Contains("Subscription", StringComparison.OrdinalIgnoreCase) ? "SUBSCRIPTION"
                         : "QUERY";
-                    var opName = attr.ArgumentList?.Arguments.FirstOrDefault()?.ToString().Trim('"')
-                        ?? method.Identifier.Text;
+                    var opName = ExtractRouteTemplate(attr) is { Length: > 0 } name
+                        ? name : method.Identifier.Text;
                     endpoints.Add(new EndpointInfo(kind, opName, "GraphQL"));
                 }
             }
         }
 
         return endpoints;
+    }
+
+    private static string CombineRouteParts(string prefix, string methodRoute)
+    {
+        if (string.IsNullOrEmpty(prefix)) return methodRoute;
+        if (string.IsNullOrEmpty(methodRoute)) return prefix;
+        return prefix.TrimEnd('/') + "/" + methodRoute.TrimStart('/');
     }
 }

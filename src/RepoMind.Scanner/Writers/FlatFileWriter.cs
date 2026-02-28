@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using RepoMind.Scanner.Models;
 using RepoMind.Scanner.Parsers;
@@ -24,16 +25,44 @@ public static class FlatFileWriter
     {
         Directory.CreateDirectory(outputDir);
 
-        WriteProjectsCatalog(outputDir, projects, assembliesByProject);
-        WriteDependencyGraph(outputDir, assembliesByProject);
-        WriteTypesIndex(outputDir, typesByProject);
+        AtomicWriteAllText(Path.Combine(outputDir, "projects.json"),
+            BuildProjectsCatalog(projects, assembliesByProject));
+        AtomicWriteAllText(Path.Combine(outputDir, "dependency-graph.json"),
+            BuildDependencyGraph(assembliesByProject));
+        AtomicWriteAllText(Path.Combine(outputDir, "types-index.json"),
+            BuildTypesIndex(typesByProject));
         WritePerProjectSummaries(outputDir, projects, assembliesByProject, typesByProject, configByProject);
 
         Log.Information("Flat files written to {OutputDir}", outputDir);
     }
 
-    private static void WriteProjectsCatalog(
-        string outputDir, List<ProjectInfo> projects,
+    /// <summary>
+    /// Merges new scan results into existing flat files, preserving data for projects not in the current batch.
+    /// </summary>
+    public static void MergeAll(
+        string outputDir,
+        List<ProjectInfo> projects,
+        Dictionary<string, List<AssemblyInfo>> assembliesByProject,
+        Dictionary<string, List<TypeInfo>> typesByProject,
+        Dictionary<string, List<ConfigEntry>>? configByProject = null)
+    {
+        Directory.CreateDirectory(outputDir);
+
+        var scannedNames = new HashSet<string>(projects.Select(p => p.Name));
+
+        MergeJsonArrayFile(Path.Combine(outputDir, "projects.json"), "name", scannedNames,
+            BuildProjectsCatalog(projects, assembliesByProject));
+        MergeJsonObjectFile(Path.Combine(outputDir, "dependency-graph.json"), scannedNames,
+            BuildDependencyGraph(assembliesByProject));
+        MergeJsonArrayFile(Path.Combine(outputDir, "types-index.json"), "project", scannedNames,
+            BuildTypesIndex(typesByProject));
+        WritePerProjectSummaries(outputDir, projects, assembliesByProject, typesByProject, configByProject);
+
+        Log.Information("Flat files merged/updated in {OutputDir}", outputDir);
+    }
+
+    private static string BuildProjectsCatalog(
+        List<ProjectInfo> projects,
         Dictionary<string, List<AssemblyInfo>> assembliesByProject)
     {
         var catalog = projects.Select(p => new
@@ -43,13 +72,11 @@ public static class FlatFileWriter
             Assemblies = assembliesByProject.GetValueOrDefault(p.Name, [])
                 .Select(a => new { a.AssemblyName, a.TargetFramework, a.OutputType })
         });
-
-        var json = JsonSerializer.Serialize(catalog, JsonOpts);
-        File.WriteAllText(Path.Combine(outputDir, "projects.json"), json);
+        return JsonSerializer.Serialize(catalog, JsonOpts);
     }
 
-    private static void WriteDependencyGraph(
-        string outputDir, Dictionary<string, List<AssemblyInfo>> assembliesByProject)
+    private static string BuildDependencyGraph(
+        Dictionary<string, List<AssemblyInfo>> assembliesByProject)
     {
         var graph = new Dictionary<string, List<string>>();
         foreach (var (project, assemblies) in assembliesByProject)
@@ -63,13 +90,11 @@ public static class FlatFileWriter
                 .ToList();
             if (deps.Count > 0) graph[project] = deps;
         }
-
-        var json = JsonSerializer.Serialize(graph, JsonOpts);
-        File.WriteAllText(Path.Combine(outputDir, "dependency-graph.json"), json);
+        return JsonSerializer.Serialize(graph, JsonOpts);
     }
 
-    private static void WriteTypesIndex(
-        string outputDir, Dictionary<string, List<TypeInfo>> typesByProject)
+    private static string BuildTypesIndex(
+        Dictionary<string, List<TypeInfo>> typesByProject)
     {
         var publicTypes = typesByProject
             .SelectMany(kvp => kvp.Value.Where(t => t.IsPublic).Select(t => new
@@ -92,9 +117,7 @@ public static class FlatFileWriter
             }))
             .OrderBy(t => t.NamespaceName)
             .ThenBy(t => t.TypeName);
-
-        var json = JsonSerializer.Serialize(publicTypes, JsonOpts);
-        File.WriteAllText(Path.Combine(outputDir, "types-index.json"), json);
+        return JsonSerializer.Serialize(publicTypes, JsonOpts);
     }
 
     private static void WritePerProjectSummaries(
@@ -195,7 +218,78 @@ public static class FlatFileWriter
                 }
             }
 
-            File.WriteAllText(Path.Combine(projectDir, $"{project.Name}.md"), string.Join('\n', lines));
+            var safeName = SanitizeFileName(project.Name);
+            AtomicWriteAllText(Path.Combine(projectDir, $"{safeName}.md"), string.Join('\n', lines));
         }
+    }
+
+    private static void AtomicWriteAllText(string path, string contents)
+    {
+        var tmpPath = path + ".tmp";
+        File.WriteAllText(tmpPath, contents);
+        File.Move(tmpPath, path, overwrite: true);
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        foreach (var c in invalid)
+            name = name.Replace(c, '_');
+        return name;
+    }
+
+    private static void MergeJsonArrayFile(string path, string projectKeyName, HashSet<string> scannedNames, string newEntriesJson)
+    {
+        var merged = new JsonArray();
+        if (File.Exists(path))
+        {
+            var existing = JsonNode.Parse(File.ReadAllText(path))?.AsArray();
+            if (existing != null)
+            {
+                foreach (var node in existing)
+                {
+                    if (node is JsonObject obj &&
+                        obj[projectKeyName]?.GetValue<string>() is string name &&
+                        scannedNames.Contains(name))
+                        continue;
+                    merged.Add(node?.DeepClone());
+                }
+            }
+        }
+
+        var newEntries = JsonNode.Parse(newEntriesJson)?.AsArray();
+        if (newEntries != null)
+        {
+            foreach (var node in newEntries)
+                merged.Add(node?.DeepClone());
+        }
+
+        AtomicWriteAllText(path, merged.ToJsonString(JsonOpts));
+    }
+
+    private static void MergeJsonObjectFile(string path, HashSet<string> scannedNames, string newEntriesJson)
+    {
+        var merged = new JsonObject();
+        if (File.Exists(path))
+        {
+            var existing = JsonNode.Parse(File.ReadAllText(path))?.AsObject();
+            if (existing != null)
+            {
+                foreach (var (key, value) in existing)
+                {
+                    if (!scannedNames.Contains(key))
+                        merged[key] = value?.DeepClone();
+                }
+            }
+        }
+
+        var newEntries = JsonNode.Parse(newEntriesJson)?.AsObject();
+        if (newEntries != null)
+        {
+            foreach (var (key, value) in newEntries)
+                merged[key] = value?.DeepClone();
+        }
+
+        AtomicWriteAllText(path, merged.ToJsonString(JsonOpts));
     }
 }

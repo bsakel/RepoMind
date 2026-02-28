@@ -27,7 +27,7 @@ public static partial class ConfigParser
             {
                 var relativePath = Path.GetRelativePath(projectDir, file).Replace('\\', '/');
                 var json = File.ReadAllText(file);
-                var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip });
+                using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip });
                 ExtractJsonKeys(doc.RootElement, "", relativePath, entries);
             }
             catch (Exception ex)
@@ -40,6 +40,7 @@ public static partial class ConfigParser
         var csFiles = Directory.GetFiles(projectDir, "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
                      && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                     && !f.Contains($"{Path.DirectorySeparatorChar}test{Path.DirectorySeparatorChar}")
                      && !f.Contains($"{Path.DirectorySeparatorChar}tests{Path.DirectorySeparatorChar}"))
             .ToList();
 
@@ -51,10 +52,12 @@ public static partial class ConfigParser
                 var content = File.ReadAllText(file);
                 ExtractCSharpConfigKeys(content, relativePath, entries);
             }
-            catch { /* ignore unreadable files */ }
+            catch (Exception ex) { Log.Warning("Failed to parse config in {File}: {Error}", file, ex.Message); }
         }
 
-        return entries;
+        return entries
+            .DistinctBy(e => (e.KeyName, e.Source, e.FilePath))
+            .ToList();
     }
 
     private static void ExtractJsonKeys(JsonElement element, string prefix, string filePath, List<ConfigEntry> entries)

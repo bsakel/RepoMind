@@ -35,6 +35,7 @@ public class ScannerEngine
 
             var dbPath = Path.Combine(options.OutputDir, "repomind.db");
             var existingHashes = new Dictionary<string, string>();
+            var computedHashes = new Dictionary<string, string>();
             var skippedCount = 0;
 
             if (options.Incremental && File.Exists(dbPath))
@@ -57,6 +58,7 @@ public class ScannerEngine
                 if (options.Incremental && existingHashes.Count > 0)
                 {
                     var currentHash = ComputeProjectHash(dir);
+                    computedHashes[name] = currentHash;
                     if (existingHashes.TryGetValue(name, out var storedHash) && storedHash == currentHash)
                     {
                         Log.Information("[{Project}] Skipped (unchanged)", name);
@@ -84,10 +86,13 @@ public class ScannerEngine
                     remote = proc?.StandardOutput.ReadToEnd().Trim();
                     proc?.WaitForExit();
                     if (proc?.ExitCode != 0) remote = null;
+                    if (remote != null)
+                        remote = SanitizeGitUrl(remote);
                 }
                 catch { /* ignore */ }
 
-                var project = new ProjectInfo(name, dir, slnName, remote, "master");
+                var defaultBranch = DetectDefaultBranch(dir);
+                var project = new ProjectInfo(name, dir, slnName, remote, defaultBranch);
                 projects.Add(project);
 
                 var assemblies = CsprojParser.ParseProject(dir, name);
@@ -142,8 +147,9 @@ public class ScannerEngine
                     if (configEntries.Count > 0)
                         writer.InsertConfigKeys(project.Name, configEntries);
 
-                    // Store hash for incremental scanning
-                    var hash = ComputeProjectHash(project.DirectoryPath);
+                    // Store hash for incremental scanning (reuse if already computed)
+                    if (!computedHashes.TryGetValue(project.Name, out var hash))
+                        hash = ComputeProjectHash(project.DirectoryPath);
                     writer.UpsertScanHash(project.Name, hash);
                 }
 
@@ -153,7 +159,10 @@ public class ScannerEngine
 
             if (!options.SqliteOnly)
             {
-                FlatFileWriter.WriteAll(options.OutputDir, projects, assembliesByProject, typesByProject, configByProject);
+                if (options.Incremental)
+                    FlatFileWriter.MergeAll(options.OutputDir, projects, assembliesByProject, typesByProject, configByProject);
+                else
+                    FlatFileWriter.WriteAll(options.OutputDir, projects, assembliesByProject, typesByProject, configByProject);
             }
 
             sw.Stop();
@@ -169,6 +178,54 @@ public class ScannerEngine
             Log.Error(ex, "Scanner failed");
             return new ScanSummary(0, 0, sw.Elapsed.TotalSeconds, false, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Detect the default branch for a git repository.
+    /// </summary>
+    internal static string DetectDefaultBranch(string repoDir)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("git", "symbolic-ref refs/remotes/origin/HEAD --short")
+            {
+                WorkingDirectory = repoDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi);
+            var output = proc?.StandardOutput.ReadToEnd().Trim();
+            proc?.WaitForExit();
+            if (proc?.ExitCode == 0 && !string.IsNullOrEmpty(output))
+            {
+                // Strip "origin/" prefix
+                const string prefix = "origin/";
+                return output.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                    ? output[prefix.Length..]
+                    : output;
+            }
+        }
+        catch { /* ignore */ }
+
+        return "main";
+    }
+
+    /// <summary>
+    /// Strip embedded credentials from a git remote URL.
+    /// Converts "https://user:pass@host/repo" to "https://host/repo".
+    /// </summary>
+    internal static string SanitizeGitUrl(string url)
+    {
+        var schemeEnd = url.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd < 0) return url;
+
+        var afterScheme = schemeEnd + 3;
+        var atIndex = url.IndexOf('@', afterScheme);
+        if (atIndex < 0) return url;
+
+        return string.Concat(url.AsSpan(0, afterScheme), url.AsSpan(atIndex + 1));
     }
 
     /// <summary>

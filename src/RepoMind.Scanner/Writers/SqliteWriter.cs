@@ -201,9 +201,18 @@ public class SqliteWriter : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    private void CreateSchema()
+    /// <summary>
+    /// Apply the full production schema to the given connection.
+    /// Used by test fixtures to avoid schema duplication.
+    /// </summary>
+    public static void CreateSchemaOn(SqliteConnection connection)
     {
-        var sql = @"
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = SchemaDefinitionSql;
+        cmd.ExecuteNonQuery();
+    }
+
+    internal const string SchemaDefinitionSql = @"
             CREATE TABLE projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -327,9 +336,9 @@ public class SqliteWriter : IDisposable
             CREATE INDEX idx_config_keys_source ON config_keys(source);
         ";
 
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
+    private void CreateSchema()
+    {
+        CreateSchemaOn(_connection);
         Log.Information("SQLite schema created.");
     }
 

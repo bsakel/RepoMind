@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.Extensions.Logging;
 using RepoMind.Mcp.Services;
 using ModelContextProtocol.Server;
 
@@ -9,11 +10,13 @@ public class RepoTools
 {
     private readonly GitService _git;
     private readonly ScannerService _scanner;
+    private readonly ILogger<RepoTools> _logger;
 
-    public RepoTools(GitService git, ScannerService scanner)
+    public RepoTools(GitService git, ScannerService scanner, ILogger<RepoTools> logger)
     {
         _git = git;
         _scanner = scanner;
+        _logger = logger;
     }
 
     [McpServerTool(Name = "update_repos"), Description(
@@ -24,6 +27,9 @@ public class RepoTools
         [Description("When true, automatically rescan changed projects after pulling")] bool autoRescan = false,
         CancellationToken ct = default)
     {
+        _logger.LogInformation("Tool {ToolName} invoked", "update_repos");
+        _logger.LogDebug("Parameters: autoRescan={AutoRescan}", autoRescan);
+
         var results = await _git.PullAllRepos(ct);
 
         var lines = new List<string> { "| Project | Branch | Status | Details |", "| --- | --- | --- | --- |" };
@@ -68,8 +74,10 @@ public class RepoTools
     [McpServerTool(Name = "get_repo_status"), Description(
         "Show git status for all repos: " +
         "current branch, uncommitted changes, ahead/behind remote.")]
-    public async Task<string> GetRepoStatus(CancellationToken ct)
+    public async Task<string> GetRepoStatus(CancellationToken ct = default)
     {
+        _logger.LogInformation("Tool {ToolName} invoked", "get_repo_status");
+
         var statuses = await _git.GetAllStatuses(ct);
 
         var lines = new List<string> { "| Project | Branch | Changes | Ahead | Behind |", "| --- | --- | --- | --- | --- |" };

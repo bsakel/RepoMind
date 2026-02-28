@@ -1,6 +1,7 @@
 using RepoMind.Mcp.Configuration;
 using RepoMind.Mcp.Services;
 using RepoMind.Mcp.Tests.TestFixtures;
+using RepoMind.Mcp.Tools;
 using FluentAssertions;
 using Xunit;
 
@@ -8,7 +9,7 @@ namespace RepoMind.Mcp.Tests.Tools;
 
 public class AnalysisToolsTests : IClassFixture<TestDatabaseFixture>
 {
-    private readonly QueryService _sut;
+    private readonly AnalysisTools _sut;
 
     public AnalysisToolsTests(TestDatabaseFixture fixture)
     {
@@ -17,7 +18,8 @@ public class AnalysisToolsTests : IClassFixture<TestDatabaseFixture>
             RootPath = "/repos",
             DbPath = ":memory:",
         };
-        _sut = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance, () => fixture.Connection);
+        var queryService = new QueryService(config, Microsoft.Extensions.Logging.Abstractions.NullLogger<QueryService>.Instance, () => fixture.Connection);
+        _sut = new AnalysisTools(queryService, Microsoft.Extensions.Logging.Abstractions.NullLogger<AnalysisTools>.Instance);
     }
 
     // --- TraceFlow tests ---

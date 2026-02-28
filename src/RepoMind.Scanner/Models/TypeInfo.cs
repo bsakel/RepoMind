@@ -10,4 +10,5 @@ public record TypeInfo(
     List<string> ImplementedInterfaces,
     List<string> InjectedDependencies,
     string? SummaryComment,
-    List<MethodInfo>? Methods = null);
+    List<MethodInfo>? Methods = null,
+    bool IsPartial = false);

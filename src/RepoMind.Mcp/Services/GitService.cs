@@ -1,4 +1,5 @@
 using RepoMind.Mcp.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace RepoMind.Mcp.Services;
 
@@ -6,11 +7,13 @@ public class GitService
 {
     private readonly RepoMindConfiguration _config;
     private readonly IProcessRunner _processRunner;
+    private readonly ILogger<GitService> _logger;
 
-    public GitService(RepoMindConfiguration config, IProcessRunner processRunner)
+    public GitService(RepoMindConfiguration config, IProcessRunner processRunner, ILogger<GitService> logger)
     {
         _config = config;
         _processRunner = processRunner;
+        _logger = logger;
     }
 
     public List<string> GetAllRepoDirectories()
@@ -59,7 +62,7 @@ public class GitService
     public async Task<List<RepoStatus>> GetAllStatuses(CancellationToken ct = default)
     {
         var repos = GetAllRepoDirectories();
-        var results = new List<RepoStatus>();
+        _logger.LogInformation("Getting status for {RepoCount} repositories", repos.Count);
         var semaphore = new SemaphoreSlim(_config.MaxParallelism);
 
         var tasks = repos.Select(async repo =>
@@ -67,7 +70,12 @@ public class GitService
             await semaphore.WaitAsync(ct);
             try
             {
+                _logger.LogDebug("Getting status for repo {RepoName}", Path.GetFileName(repo));
                 return await GetRepoStatus(repo, ct);
+            }
+            catch (Exception)
+            {
+                return new RepoStatus(Path.GetFileName(repo), "error", false, 0, 0);
             }
             finally
             {
@@ -83,18 +91,24 @@ public class GitService
         var name = Path.GetFileName(repoPath);
         var branch = await GetBranchName(repoPath, ct);
 
-        if (branch != "master" && branch != "main")
+        if (!IsAllowedBranch(branch))
         {
             return new PullResult(name, branch, PullStatus.NonMasterBranch, $"On branch '{branch}' — skipped. Switch to master/main first.");
         }
 
         var fetchResult = await _processRunner.RunAsync("git", "fetch origin", repoPath, ct);
         if (fetchResult.ExitCode != 0)
+        {
+            _logger.LogWarning("Git fetch failed for {RepoName} with exit code {ExitCode}: {Error}", name, fetchResult.ExitCode, fetchResult.StandardError);
             return new PullResult(name, branch, PullStatus.Error, $"Fetch failed: {fetchResult.StandardError}");
+        }
 
         var pullResult = await _processRunner.RunAsync("git", "pull", repoPath, ct);
         if (pullResult.ExitCode != 0)
+        {
+            _logger.LogWarning("Git pull failed for {RepoName} with exit code {ExitCode}: {Error}", name, pullResult.ExitCode, pullResult.StandardError);
             return new PullResult(name, branch, PullStatus.Error, $"Pull failed: {pullResult.StandardError}");
+        }
 
         var message = pullResult.StandardOutput.Contains("Already up to date")
             ? "Already up to date."
@@ -106,6 +120,7 @@ public class GitService
     public async Task<List<PullResult>> PullAllRepos(CancellationToken ct = default)
     {
         var repos = GetAllRepoDirectories();
+        _logger.LogInformation("Pulling {RepoCount} repositories", repos.Count);
         var semaphore = new SemaphoreSlim(_config.MaxParallelism);
 
         var tasks = repos.Select(async repo =>
@@ -113,7 +128,12 @@ public class GitService
             await semaphore.WaitAsync(ct);
             try
             {
+                _logger.LogDebug("Pulling repo {RepoName}", Path.GetFileName(repo));
                 return await FetchAndPull(repo, ct);
+            }
+            catch (Exception)
+            {
+                return new PullResult(Path.GetFileName(repo), "unknown", PullStatus.Error, "Unexpected error during pull.");
             }
             finally
             {
@@ -122,6 +142,11 @@ public class GitService
         });
 
         return (await Task.WhenAll(tasks)).ToList();
+    }
+
+    private bool IsAllowedBranch(string branch)
+    {
+        return _config.AllowedBranches.Contains(branch, StringComparer.OrdinalIgnoreCase);
     }
 }
 
