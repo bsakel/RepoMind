@@ -107,10 +107,10 @@ Run the scanner CLI with `--flat-only`:
 
 ```bash
 # Full scan
-dotnet run --project src/RepoMind.Scanner -- --root /path/to/your/codebase --flat-only
+dotnet run --project src/RepoMind.Scanner.Cli -- --root /path/to/your/codebase --flat-only
 
 # Incremental scan (only changed projects)
-dotnet run --project src/RepoMind.Scanner -- --root /path/to/your/codebase --flat-only --incremental
+dotnet run --project src/RepoMind.Scanner.Cli -- --root /path/to/your/codebase --flat-only --incremental
 ```
 
 #### Output
@@ -182,7 +182,8 @@ Directory.Build.props               # Shared net10.0 settings
 
 src/
   RepoMind.Mcp/                     # MCP server
-  RepoMind.Scanner/                  # Roslyn scanner
+  RepoMind.Scanner/                  # Roslyn scanner (library)
+  RepoMind.Scanner.Cli/              # Scanner CLI entry point
 
 tests/
   RepoMind.Mcp.Tests/               # 74 xUnit tests
