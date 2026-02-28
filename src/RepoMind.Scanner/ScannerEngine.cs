@@ -8,7 +8,9 @@ namespace RepoMind.Scanner;
 
 public record ScanOptions(string RootPath, string OutputDir, bool SqliteOnly = false, bool FlatOnly = false, bool Incremental = false);
 
-public record ScanSummary(int ProjectCount, int TypeCount, double ElapsedSeconds, bool Success, string? Error = null, int SkippedCount = 0);
+public record ProjectFailure(string ProjectName, string Error);
+
+public record ScanSummary(int ProjectCount, int TypeCount, double ElapsedSeconds, bool Success, string? Error = null, int SkippedCount = 0, List<ProjectFailure>? FailedProjects = null);
 
 /// <summary>
 /// Core scanning engine that can be called in-process from other projects.
@@ -37,6 +39,7 @@ public class ScannerEngine
             var existingHashes = new Dictionary<string, string>();
             var computedHashes = new Dictionary<string, string>();
             var skippedCount = 0;
+            var failedProjects = new List<ProjectFailure>();
 
             if (options.Incremental && File.Exists(dbPath))
             {
@@ -44,15 +47,21 @@ public class ScannerEngine
                 Log.Information("Incremental mode: loaded {Count} existing project hashes", existingHashes.Count);
             }
 
+            var scannableCount = directories.Count;
+            var currentIndex = 0;
+
             foreach (var dir in directories)
             {
                 var name = Path.GetFileName(dir);
                 var gitDir = Path.Combine(dir, ".git");
                 if (!Directory.Exists(gitDir))
                 {
-                    Log.Information("[{Project}] Skipped (not a git repo)", name);
+                    scannableCount--;
+                    Log.Debug("[{Project}] Skipped (not a git repo)", name);
                     continue;
                 }
+
+                currentIndex++;
 
                 // Incremental: skip unchanged projects
                 if (options.Incremental && existingHashes.Count > 0)
@@ -61,51 +70,63 @@ public class ScannerEngine
                     computedHashes[name] = currentHash;
                     if (existingHashes.TryGetValue(name, out var storedHash) && storedHash == currentHash)
                     {
-                        Log.Information("[{Project}] Skipped (unchanged)", name);
+                        Log.Information("[{Index}/{Total}] {Project} — skipped (unchanged)", currentIndex, scannableCount, name);
                         skippedCount++;
                         continue;
                     }
                 }
 
-                Log.Information("[{Project}] Scanning...", name);
+                Log.Information("[{Index}/{Total}] Scanning {Project}...", currentIndex, scannableCount, name);
+                var projectSw = Stopwatch.StartNew();
 
-                var slnFile = Directory.GetFiles(dir, "*.sln", SearchOption.TopDirectoryOnly).FirstOrDefault();
-                var slnName = slnFile != null ? Path.GetFileName(slnFile) : null;
-
-                string? remote = null;
                 try
                 {
-                    var psi = new ProcessStartInfo("git", "remote get-url origin")
+                    var slnFile = Directory.GetFiles(dir, "*.sln", SearchOption.TopDirectoryOnly).FirstOrDefault();
+                    var slnName = slnFile != null ? Path.GetFileName(slnFile) : null;
+
+                    string? remote = null;
+                    try
                     {
-                        WorkingDirectory = dir,
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    using var proc = Process.Start(psi);
-                    remote = proc?.StandardOutput.ReadToEnd().Trim();
-                    proc?.WaitForExit();
-                    if (proc?.ExitCode != 0) remote = null;
-                    if (remote != null)
-                        remote = SanitizeGitUrl(remote);
+                        var psi = new ProcessStartInfo("git", "remote get-url origin")
+                        {
+                            WorkingDirectory = dir,
+                            RedirectStandardOutput = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        using var proc = Process.Start(psi);
+                        remote = proc?.StandardOutput.ReadToEnd().Trim();
+                        proc?.WaitForExit();
+                        if (proc?.ExitCode != 0) remote = null;
+                        if (remote != null)
+                            remote = SanitizeGitUrl(remote);
+                    }
+                    catch { /* ignore */ }
+
+                    var defaultBranch = DetectDefaultBranch(dir);
+                    var project = new ProjectInfo(name, dir, slnName, remote, defaultBranch);
+                    projects.Add(project);
+
+                    var assemblies = CsprojParser.ParseProject(dir, name);
+                    assembliesByProject[name] = assemblies;
+
+                    var types = RoslynScanner.ScanSourceFiles(dir);
+                    typesByProject[name] = types;
+
+                    var configEntries = ConfigParser.ScanProject(dir);
+                    configByProject[name] = configEntries;
+
+                    projectSw.Stop();
+                    Log.Information("[{Index}/{Total}] {Project} — {AsmCount} assemblies, {TypeCount} types, {ConfigCount} config keys ({Elapsed:F1}s)",
+                        currentIndex, scannableCount, name, assemblies.Count, types.Count, configEntries.Count, projectSw.Elapsed.TotalSeconds);
                 }
-                catch { /* ignore */ }
-
-                var defaultBranch = DetectDefaultBranch(dir);
-                var project = new ProjectInfo(name, dir, slnName, remote, defaultBranch);
-                projects.Add(project);
-
-                var assemblies = CsprojParser.ParseProject(dir, name);
-                assembliesByProject[name] = assemblies;
-
-                var types = RoslynScanner.ScanSourceFiles(dir);
-                typesByProject[name] = types;
-
-                var configEntries = ConfigParser.ScanProject(dir);
-                configByProject[name] = configEntries;
-
-                Log.Information("[{Project}] Found {AsmCount} assemblies, {TypeCount} types, {ConfigCount} config keys",
-                    name, assemblies.Count, types.Count, configEntries.Count);
+                catch (Exception ex)
+                {
+                    projectSw.Stop();
+                    Log.Error(ex, "[{Index}/{Total}] {Project} — FAILED ({Elapsed:F1}s): {Error}",
+                        currentIndex, scannableCount, name, projectSw.Elapsed.TotalSeconds, ex.Message);
+                    failedProjects.Add(new ProjectFailure(name, ex.Message));
+                }
             }
 
             // Resolve internal packages by matching against all known assembly names
@@ -167,10 +188,19 @@ public class ScannerEngine
 
             sw.Stop();
             var totalTypes = typesByProject.Values.Sum(t => t.Count);
-            Log.Information("Scan complete in {Elapsed}s. {Projects} projects scanned, {Skipped} skipped, {Types} total types.",
-                sw.Elapsed.TotalSeconds.ToString("F1"), projects.Count, skippedCount, totalTypes);
 
-            return new ScanSummary(projects.Count, totalTypes, sw.Elapsed.TotalSeconds, true, SkippedCount: skippedCount);
+            if (failedProjects.Count > 0)
+            {
+                Log.Warning("Scan completed with {FailCount} failure(s):", failedProjects.Count);
+                foreach (var f in failedProjects)
+                    Log.Warning("  ✗ {Project}: {Error}", f.ProjectName, f.Error);
+            }
+
+            Log.Information("Scan complete in {Elapsed}s. {Projects} projects scanned, {Skipped} skipped, {Failed} failed, {Types} total types.",
+                sw.Elapsed.TotalSeconds.ToString("F1"), projects.Count, skippedCount, failedProjects.Count, totalTypes);
+
+            return new ScanSummary(projects.Count, totalTypes, sw.Elapsed.TotalSeconds, true,
+                SkippedCount: skippedCount, FailedProjects: failedProjects.Count > 0 ? failedProjects : null);
         }
         catch (Exception ex)
         {

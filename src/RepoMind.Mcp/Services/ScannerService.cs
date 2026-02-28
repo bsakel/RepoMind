@@ -42,7 +42,9 @@ public class ScannerService
 
                 var msg = summary.Success
                     ? $"Scanned {summary.ProjectCount} projects, {summary.TypeCount} types in {summary.ElapsedSeconds:F1}s" +
-                      (summary.SkippedCount > 0 ? $" ({summary.SkippedCount} unchanged, skipped)" : "")
+                      (summary.SkippedCount > 0 ? $" ({summary.SkippedCount} unchanged, skipped)" : "") +
+                      (summary.FailedProjects?.Count > 0 ? $"\n⚠️ {summary.FailedProjects.Count} project(s) failed:\n" +
+                          string.Join("\n", summary.FailedProjects.Select(f => $"  • {f.ProjectName}: {f.Error}")) : "")
                     : $"Scanner failed: {summary.Error}";
 
                 return new ScanResult(summary.Success, msg, TimeSpan.FromSeconds(summary.ElapsedSeconds));
@@ -102,7 +104,9 @@ public class ScannerService
 
                 var msg = summary.Success
                     ? $"Rescanned project '{projectName}': {summary.ProjectCount} projects processed, {summary.TypeCount} types in {summary.ElapsedSeconds:F1}s" +
-                      (summary.SkippedCount > 0 ? $" ({summary.SkippedCount} unchanged, skipped)" : "")
+                      (summary.SkippedCount > 0 ? $" ({summary.SkippedCount} unchanged, skipped)" : "") +
+                      (summary.FailedProjects?.Count > 0 ? $"\n⚠️ {summary.FailedProjects.Count} project(s) failed:\n" +
+                          string.Join("\n", summary.FailedProjects.Select(f => $"  • {f.ProjectName}: {f.Error}")) : "")
                     : $"Scanner failed: {summary.Error}";
 
                 return new ScanResult(summary.Success, msg, TimeSpan.FromSeconds(summary.ElapsedSeconds));
