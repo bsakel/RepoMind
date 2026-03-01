@@ -34,7 +34,7 @@ src/
     Program.cs                              # Thin CLI wrapper
 
 tests/
-  RepoMind.Mcp.Tests/                       # xUnit tests (105 tests)
+  RepoMind.Mcp.Tests/                       # xUnit tests (119 tests)
     TestFixtures/TestDatabaseFixture.cs     # In-memory SQLite with test data
     Services/                               # QueryService, GitService tests
     Tools/                                  # Tool-level tests

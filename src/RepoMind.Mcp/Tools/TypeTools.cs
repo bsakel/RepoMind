@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
+using RepoMind.Mcp.Models;
 using RepoMind.Mcp.Services;
 using ModelContextProtocol.Server;
 
@@ -20,18 +22,23 @@ public class TypeTools
     [McpServerTool(Name = "search_types"), Description(
         "Search for types across all projects by name pattern, namespace, " +
         "kind (class/interface/enum/record), or project. " +
-        "Supports wildcards: 'Publish*', '*Service', '*Cache*'.")]
+        "Supports wildcards: 'Publish*', '*Service', '*Cache*'. " +
+        "Set format='json' for structured output with result count and query timing.")]
     public string SearchTypes(
         [Description("Type name pattern with optional wildcards (*)")] string namePattern,
         [Description("Filter by namespace (optional)")] string? namespaceName = null,
         [Description("Filter by kind: class, interface, enum, record (optional)")] string? kind = null,
-        [Description("Filter by project name (optional)")] string? projectName = null)
+        [Description("Filter by project name (optional)")] string? projectName = null,
+        [Description("Output format: 'markdown' (default) or 'json' for structured results")] string? format = null)
     {
         _logger.LogInformation("Tool {ToolName} invoked", "search_types");
         _logger.LogDebug("Parameters: namePattern={NamePattern}, namespaceName={NamespaceName}, kind={Kind}, projectName={ProjectName}", namePattern, namespaceName, kind, projectName);
         try
         {
-            return _query.SearchTypes(namePattern, namespaceName, kind, projectName);
+            var sw = Stopwatch.StartNew();
+            var result = _query.SearchTypes(namePattern, namespaceName, kind, projectName);
+            sw.Stop();
+            return ToolResultFormatter.Format(result, sw.ElapsedMilliseconds, format, limit: 50);
         }
         catch (DatabaseNotFoundException ex)
         {
@@ -41,15 +48,20 @@ public class TypeTools
 
     [McpServerTool(Name = "find_implementors"), Description(
         "Find all classes that implement a given interface across all projects. " +
-        "Critical for understanding DI registrations and extensibility points.")]
+        "Critical for understanding DI registrations and extensibility points. " +
+        "Set format='json' for structured output with result count and query timing.")]
     public string FindImplementors(
-        [Description("Interface name, e.g. 'IPublishingService' or 'ICoherentCache'")] string interfaceName)
+        [Description("Interface name, e.g. 'IPublishingService' or 'ICoherentCache'")] string interfaceName,
+        [Description("Output format: 'markdown' (default) or 'json' for structured results")] string? format = null)
     {
         _logger.LogInformation("Tool {ToolName} invoked", "find_implementors");
         _logger.LogDebug("Parameters: interfaceName={InterfaceName}", interfaceName);
         try
         {
-            return _query.FindImplementors(interfaceName);
+            var sw = Stopwatch.StartNew();
+            var result = _query.FindImplementors(interfaceName);
+            sw.Stop();
+            return ToolResultFormatter.Format(result, sw.ElapsedMilliseconds, format, limit: 100);
         }
         catch (DatabaseNotFoundException ex)
         {

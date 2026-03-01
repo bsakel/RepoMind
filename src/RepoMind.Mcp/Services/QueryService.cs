@@ -1126,6 +1126,18 @@ public class QueryService
         return name.Replace("<", "_").Replace(">", "_").Replace(" ", "_").Replace(".", "_").Replace("-", "_");
     }
 
+    private static string FormatProjectList(IEnumerable<string> projects)
+    {
+        var list = projects.ToList();
+        return list.Count switch
+        {
+            0 => "no projects",
+            1 => list[0],
+            2 => $"{list[0]} and {list[1]}",
+            _ => $"{string.Join(", ", list.Take(list.Count - 1))}, and {list[^1]}"
+        };
+    }
+
     public string SearchConfig(string keyPattern, string? source = null, string? projectName = null)
     {
         var conn = GetConnection();
@@ -1363,6 +1375,74 @@ public class QueryService
             sb.AppendLine($"- **Direct references:** {allReferences.Count} types across {directProjects.Count} projects");
             sb.AppendLine($"- **Transitive impact:** {transitiveProjects.Count} additional projects");
             sb.AppendLine($"- **Total blast radius:** {directProjects.Count + transitiveProjects.Count} projects");
+
+            // Impact Story — human-readable narrative
+            sb.AppendLine();
+            sb.AppendLine("## Impact Story");
+            sb.AppendLine();
+            if (allReferences.Count == 0)
+            {
+                var homeList = FormatProjectList(homeProjects.Select(h => h.Project));
+                if (transitiveProjects.Count == 0)
+                {
+                    sb.AppendLine($"`{typeName}` is defined in {homeList} but has no detected consumers. Changes to this type are safe and self-contained.");
+                }
+                else
+                {
+                    var transitiveList = FormatProjectList(transitiveProjects.OrderBy(p => p));
+                    sb.AppendLine($"`{typeName}` is defined in {homeList} and has no direct type-level consumers, but {transitiveList} depend on its home project. Consider whether downstream projects use this type at runtime.");
+                    sb.AppendLine();
+                    sb.AppendLine("🟡 **Moderate risk** — no direct consumers found, but downstream projects exist.");
+                }
+            }
+            else
+            {
+                var homeList = FormatProjectList(homeProjects.Select(h => h.Project));
+                sb.Append($"Changing `{typeName}` (defined in {homeList}) ");
+
+                var parts = new List<string>();
+
+                // Group by relation type
+                var byRelation = allReferences.GroupBy(r => r.Relation).OrderBy(g => g.Key);
+                foreach (var group in byRelation)
+                {
+                    var verb = group.Key switch
+                    {
+                        "implements" => "directly implemented by",
+                        "injects" => "injected into",
+                        "extends" => "extended by",
+                        _ => $"referenced ({group.Key}) by"
+                    };
+                    var typesByProject = group.GroupBy(r => r.Project).OrderBy(g => g.Key);
+                    var descriptions = new List<string>();
+                    foreach (var pg in typesByProject)
+                    {
+                        var types = string.Join(", ", pg.Select(r => $"`{r.TypeName}`"));
+                        descriptions.Add($"{types} in {pg.Key}");
+                    }
+                    parts.Add($"is {verb} {string.Join("; ", descriptions)}");
+                }
+
+                sb.AppendLine(string.Join(", and ", parts) + ".");
+
+                if (transitiveProjects.Count > 0)
+                {
+                    sb.AppendLine();
+                    var transitiveList = FormatProjectList(transitiveProjects.OrderBy(p => p));
+                    sb.AppendLine($"Beyond direct consumers, changes ripple transitively into {transitiveList} via internal NuGet dependencies.");
+                }
+
+                // Risk assessment
+                sb.AppendLine();
+                var totalBlast = directProjects.Count + transitiveProjects.Count;
+                var risk = totalBlast switch
+                {
+                    1 => "🟢 **Low risk** — impact is contained to a single project.",
+                    <= 3 => "🟡 **Moderate risk** — a few projects are affected. Coordinate with their owners.",
+                    _ => $"🔴 **High risk** — {totalBlast} projects in the blast radius. Consider a phased rollout or feature flag."
+                };
+                sb.AppendLine(risk);
+            }
 
             // Mermaid diagram
             if (allReferences.Count > 0)

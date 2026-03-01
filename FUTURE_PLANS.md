@@ -53,12 +53,12 @@ Two distribution channels:
 - **Docker**: `docker run -v /path/to/repos:/repos repomind` — no .NET SDK required on host
 - **GitHub Action**: Scan on push, publish memory as artifact. Fresh codebase intelligence on every commit. "Set it and forget it" for teams.
 
-### 10. Structured tool results
-Tools currently return markdown strings. Add structured JSON responses with metadata:
+### 10. Structured tool results ✅ Implemented
+All search/list tools now accept an optional `format` parameter. When `format='json'`, results are wrapped in a structured JSON envelope:
 ```json
-{ "results": [...], "count": 47, "truncated": false, "query_ms": 12 }
+{ "content": "...", "result_count": 47, "truncated": false, "query_ms": 12 }
 ```
-Let AI agents decide formatting. Enables pagination, smarter follow-up queries, and programmatic consumption.
+Default behavior (markdown) is unchanged for backward compatibility. The `StructuredToolResult` model parses markdown tables to extract counts and detect truncation against SQL LIMITs.
 
 ---
 
@@ -67,9 +67,12 @@ Let AI agents decide formatting. Enables pagination, smarter follow-up queries, 
 ### 11. `repomind doctor` — self-diagnostics ✅ Implemented
 A `--doctor` CLI flag that checks: database exists, schema tables present, data counts, scan freshness, flat file presence. Supports `--type=TypeName` to investigate why a specific type is missing (checks visibility, project inclusion, test/benchmark filtering).
 
-### 12. Cross-repo change impact stories
-Instead of blast radius lists, generate narrative:
-> "Changing `IUserRepository` affects: `UserService` (direct consumer in Acme.Core), `AuthController` (indirect via UserService in Acme.Web.Api), and 3 test fixtures. The interface is also referenced as a NuGet package by the Billing team's repo."
+### 12. Cross-repo change impact stories ✅ Implemented
+`analyze_impact` now includes an "Impact Story" section with human-readable narrative:
+- Groups affected types by relationship (implements, injects, extends) and project
+- Describes transitive ripple effects via internal NuGet dependencies
+- Includes risk assessment: 🟢 Low (1 project), 🟡 Moderate (2-3 projects), 🔴 High (4+ projects)
+- Handles edge cases: types with no consumers, types with only transitive dependents
 
 ### 13. Enhanced AGENTS.md generation ✅ Implemented
 `generate_agents_md` now produces a comprehensive onboarding document including:
@@ -99,8 +102,8 @@ Cache MCP tool query results with a short TTL (30s). The database is read-only b
 | 7 | Watch mode | Medium | Planned |
 | 8 | TypeScript support | Large | Planned |
 | 9 | Docker + CI | Medium | Planned |
-| 10 | Structured results | Medium | Planned |
+| 10 | Structured results | Medium | ✅ Done |
 | 11 | Doctor command | Small | ✅ Done |
-| 12 | Impact stories | Medium | Planned |
+| 12 | Impact stories | Medium | ✅ Done |
 | 13 | Enhanced AGENTS.md | Medium | ✅ Done |
 | 14 | Query caching | Small | ✅ Done |

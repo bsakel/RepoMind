@@ -422,4 +422,51 @@ public class QueryServiceTests : IClassFixture<TestDatabaseFixture>
         // Should still return same data (from DB), just verifying no crash
         result2.Should().Be(result1);
     }
+
+    [Fact]
+    public void AnalyzeImpact_ContainsImpactStory()
+    {
+        var result = _sut.AnalyzeImpact("ICoherentCache");
+
+        result.Should().Contain("## Impact Story");
+        result.Should().Contain("Changing `ICoherentCache`");
+    }
+
+    [Fact]
+    public void AnalyzeImpact_StoryContainsRiskAssessment()
+    {
+        var result = _sut.AnalyzeImpact("ICoherentCache");
+
+        // Should have one of the risk level indicators
+        result.Should().Contain("risk");
+    }
+
+    [Fact]
+    public void AnalyzeImpact_StoryDescribesRelationships()
+    {
+        var result = _sut.AnalyzeImpact("ICoherentCache");
+
+        // Should describe implementors/injectors in narrative form
+        result.Should().ContainAny("implemented by", "injected into", "extended by");
+    }
+
+    [Fact]
+    public void AnalyzeImpact_UnknownType_ReturnsNotFound()
+    {
+        var result = _sut.AnalyzeImpact("NonExistentType");
+
+        result.Should().Contain("not found");
+        result.Should().NotContain("Impact Story");
+    }
+
+    [Fact]
+    public void AnalyzeImpact_NoConsumers_ShowsModerateRisk()
+    {
+        // ContentItem is in acme.core which has downstream dependents (acme.web.api)
+        // but has no direct type-level consumers
+        var result = _sut.AnalyzeImpact("ContentItem");
+
+        result.Should().Contain("Impact Story");
+        result.Should().Contain("no direct type-level consumers");
+    }
 }

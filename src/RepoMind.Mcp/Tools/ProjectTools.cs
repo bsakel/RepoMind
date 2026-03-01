@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using RepoMind.Mcp.Services;
 using ModelContextProtocol.Server;
@@ -19,13 +20,18 @@ public class ProjectTools
 
     [McpServerTool(Name = "list_projects"), Description(
         "List all scanned projects with summary info: " +
-        "name, assembly count, type count.")]
-    public string ListProjects()
+        "name, assembly count, type count. " +
+        "Set format='json' for structured output with result count and query timing.")]
+    public string ListProjects(
+        [Description("Output format: 'markdown' (default) or 'json' for structured results")] string? format = null)
     {
         _logger.LogInformation("Tool {ToolName} invoked", "list_projects");
         try
         {
-            return _query.ListProjects();
+            var sw = Stopwatch.StartNew();
+            var result = _query.ListProjects();
+            sw.Stop();
+            return ToolResultFormatter.Format(result, sw.ElapsedMilliseconds, format);
         }
         catch (DatabaseNotFoundException ex)
         {

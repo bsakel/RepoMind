@@ -62,4 +62,34 @@ public class TypeToolsTests : IClassFixture<TestDatabaseFixture>
 
         result.Should().Contain("No types matching");
     }
+
+    [Fact]
+    public void SearchTypes_JsonFormat_ReturnsStructuredResult()
+    {
+        var result = _sut.SearchTypes("*Service*", format: "json");
+
+        result.Should().Contain("\"result_count\"");
+        result.Should().Contain("\"query_ms\"");
+        result.Should().Contain("\"truncated\"");
+        result.Should().Contain("\"content\"");
+        result.Should().Contain("CoherentCacheService");
+    }
+
+    [Fact]
+    public void FindImplementors_JsonFormat_ReturnsStructuredResult()
+    {
+        var result = _sut.FindImplementors("ICoherentCache", format: "json");
+
+        result.Should().Contain("\"result_count\"");
+        result.Should().Contain("CoherentCacheService");
+    }
+
+    [Fact]
+    public void SearchTypes_NullFormat_ReturnsMarkdown()
+    {
+        var result = _sut.SearchTypes("*Service*", format: null);
+
+        result.Should().Contain("| Type |");
+        result.Should().NotContain("\"result_count\"");
+    }
 }
